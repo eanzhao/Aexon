@@ -9,6 +9,7 @@ using Aexon.Core.Configuration;
 using Aexon.Core.Context;
 using Aexon.Core.Cron;
 using Aexon.Core.Hooks;
+using Aexon.Core.Markdown;
 using Aexon.Core.Mcp;
 using Aexon.Core.Memory;
 using Aexon.Core.Permissions;
@@ -19,6 +20,7 @@ using Aexon.Core.Todos;
 using Aexon.Core.Tools;
 using Aexon.Tools;
 using Microsoft.Extensions.AI;
+using Spectre.Console;
 
 namespace Aexon.Cli;
 
@@ -730,12 +732,28 @@ Environment:
                     Console.WriteLine(result.ToJson());
                     break;
                 case NonInteractiveOutputFormat.Markdown:
-                case NonInteractiveOutputFormat.Text:
                     if (!string.IsNullOrEmpty(result.Output))
                     {
                         Console.Write(result.Output);
                         if (!result.Output.EndsWith(Environment.NewLine, StringComparison.Ordinal))
                             Console.WriteLine();
+                    }
+                    break;
+
+                case NonInteractiveOutputFormat.Text:
+                    if (!string.IsNullOrEmpty(result.Output))
+                    {
+                        var markdownWriter = CreateMarkdownWriter(enableRendering: !Console.IsOutputRedirected);
+                        if (markdownWriter.Enabled)
+                        {
+                            markdownWriter.WriteComplete(result.Output);
+                        }
+                        else
+                        {
+                            Console.Write(result.Output);
+                            if (!result.Output.EndsWith(Environment.NewLine, StringComparison.Ordinal))
+                                Console.WriteLine();
+                        }
                     }
 
                     if (!result.Success && !string.IsNullOrWhiteSpace(result.ErrorMessage))
@@ -773,6 +791,7 @@ Environment:
         private async Task RunQueryAsync(string input)
         {
             var wroteAssistantText = false;
+            var markdownWriter = CreateMarkdownWriter(enableRendering: !Console.IsOutputRedirected);
 
             await foreach (var evt in _queryEngine.SubmitMessageAsync(input))
             {
@@ -780,7 +799,7 @@ Environment:
                 {
                     case TextDeltaEvent text:
                         wroteAssistantText = true;
-                        Console.Write(text.Text);
+                        markdownWriter.Write(text.Text);
                         break;
 
                     case ThinkingDeltaEvent:
@@ -789,10 +808,13 @@ Environment:
 
                     case ToolUseStartEvent toolUse:
                         if (wroteAssistantText)
+                        {
+                            markdownWriter.Flush();
                             Console.WriteLine();
+                        }
 
                         Console.WriteLine(
-                            $"\n[{toolUse.ToolName}] {SummarizeToolInput(toolUse.Input)}");
+                            $"[{toolUse.ToolName}] {SummarizeToolInput(toolUse.Input)}");
                         break;
 
                     case PermissionRequestEvent permissionRequest:
@@ -834,8 +856,7 @@ Environment:
                         break;
 
                     case MessageEndEvent:
-                        if (wroteAssistantText)
-                            Console.WriteLine();
+                        markdownWriter.Flush();
                         break;
 
                     case PromptCacheStatusEvent cacheStatus when cacheStatus.BreakDetected:
@@ -852,12 +873,19 @@ Environment:
                         break;
 
                     case QueryCompleteEvent complete when !complete.Success:
+                        markdownWriter.Flush();
                         Console.WriteLine();
                         Console.WriteLine($"请求失败: {complete.ErrorMessage}");
                         break;
                 }
             }
         }
+
+        private static SpectreMarkdownConsoleWriter CreateMarkdownWriter(bool enableRendering) =>
+            new(
+                AnsiConsole.Console,
+                Console.Write,
+                enableRendering);
 
         private async Task<NonInteractiveRunResult> ExecuteNonInteractiveQueryAsync(
             NonInteractiveRunOptions options)
