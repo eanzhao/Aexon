@@ -270,21 +270,12 @@ public class QueryEngine : IAsyncDisposable, IPlanModeController, IAwayModeContr
 
             if (requestError != null)
             {
-                await _hooks.OnStopFailureAsync(
-                    BuildStopHookContext(
-                        success: false,
-                        errorMessage: requestError,
-                        duration: DateTimeOffset.UtcNow - startTime,
-                        turnCount),
-                    ct);
-
-                await AddRuntimeMessagesAsync(
-                    CreateStopLifecycleMessages(
-                        success: false,
-                        duration: DateTimeOffset.UtcNow - startTime,
-                        turnCount: turnCount,
-                        stopReason: lastStopReason,
-                        errorMessage: requestError),
+                await RunStopLifecycleAsync(
+                    success: false,
+                    errorMessage: requestError,
+                    duration: DateTimeOffset.UtcNow - startTime,
+                    turnCount: turnCount,
+                    stopReason: lastStopReason,
                     ct);
 
                 yield return new QueryCompleteEvent
@@ -298,14 +289,7 @@ public class QueryEngine : IAsyncDisposable, IPlanModeController, IAwayModeContr
                 yield break;
             }
 
-            PromptCacheStatusEvent? promptCacheStatusEvent = null;
-            if (assistantTurn.Usage != null)
-            {
-                _totalUsage += assistantTurn.Usage;
-                promptCacheStatusEvent = CreatePromptCacheStatusEvent(
-                    promptCachingEnabled,
-                    assistantTurn.Usage);
-            }
+            var promptCacheStatusEvent = AccumulateAssistantUsage(assistantTurn, promptCachingEnabled);
 
             lastStopReason = assistantTurn.StopReason;
 
@@ -344,21 +328,12 @@ public class QueryEngine : IAsyncDisposable, IPlanModeController, IAwayModeContr
             }
         }
 
-        await _hooks.OnStopAsync(
-            BuildStopHookContext(
-                success: true,
-                errorMessage: null,
-                duration: DateTimeOffset.UtcNow - startTime,
-                turnCount),
-            ct);
-
-        await AddRuntimeMessagesAsync(
-            CreateStopLifecycleMessages(
-                success: true,
-                duration: DateTimeOffset.UtcNow - startTime,
-                turnCount: turnCount,
-                stopReason: lastStopReason,
-                errorMessage: null),
+        await RunStopLifecycleAsync(
+            success: true,
+            errorMessage: null,
+            duration: DateTimeOffset.UtcNow - startTime,
+            turnCount: turnCount,
+            stopReason: lastStopReason,
             ct);
 
         yield return new QueryCompleteEvent
@@ -368,6 +343,45 @@ public class QueryEngine : IAsyncDisposable, IPlanModeController, IAwayModeContr
             TurnCount = turnCount,
             TotalUsage = _totalUsage,
         };
+    }
+
+    /// <summary>
+    /// Runs the shared stop lifecycle for a completed turn loop: fires the stop
+    /// (or stop-failure) hook and appends the lifecycle messages. Shared by the
+    /// success and error exits of <see cref="SubmitMessageAsync"/>.
+    /// </summary>
+    private async Task RunStopLifecycleAsync(
+        bool success,
+        string? errorMessage,
+        TimeSpan duration,
+        int turnCount,
+        string? stopReason,
+        CancellationToken ct)
+    {
+        var hookContext = BuildStopHookContext(success, errorMessage, duration, turnCount);
+        if (success)
+            await _hooks.OnStopAsync(hookContext, ct);
+        else
+            await _hooks.OnStopFailureAsync(hookContext, ct);
+
+        await AddRuntimeMessagesAsync(
+            CreateStopLifecycleMessages(success, duration, turnCount, stopReason, errorMessage),
+            ct);
+    }
+
+    /// <summary>
+    /// Accumulates the assistant turn's token usage and produces the prompt-cache
+    /// status event for the turn, if usage was reported.
+    /// </summary>
+    private PromptCacheStatusEvent? AccumulateAssistantUsage(
+        AssistantTurnAccumulator assistantTurn,
+        bool promptCachingEnabled)
+    {
+        if (assistantTurn.Usage == null)
+            return null;
+
+        _totalUsage += assistantTurn.Usage;
+        return CreatePromptCacheStatusEvent(promptCachingEnabled, assistantTurn.Usage);
     }
 
     /// <summary>
