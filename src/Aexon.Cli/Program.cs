@@ -179,45 +179,23 @@ internal static class Program
             }
         }
 
-        var defaultProviderFromStore = string.IsNullOrWhiteSpace(storedCredentials?.DefaultProvider)
-            ? null
-            : storedCredentials!.DefaultProvider;
-        var defaultModelFromStore = resumed == null &&
-                                    string.IsNullOrWhiteSpace(options.Model) &&
-                                    !string.IsNullOrWhiteSpace(storedCredentials?.DefaultModel)
-            ? storedCredentials!.DefaultModel
-            : null;
-
-        // An explicit --provider / --model flag always beats a stored proxy
-        // default: the user asked for something specific, so don't silently
-        // reroute them through an AI Service. Absent overrides, the proxy
-        // slug forces OpenAI-compat routing via /api/v1/proxy/s/{slug}/v1/.
-        var activeProxySlug = string.IsNullOrWhiteSpace(options.Provider) &&
-                              !string.IsNullOrWhiteSpace(storedCredentials?.DefaultProxySlug)
-            ? storedCredentials!.DefaultProxySlug
-            : null;
-        var activeProxyLabel = activeProxySlug != null
-            ? storedCredentials?.DefaultProxyLabel
-            : null;
-
-        AiSessionTarget sessionTarget;
-        if (activeProxySlug != null)
-        {
-            sessionTarget = AiProviderSelection.ResolveSessionTargetForProxyService(
-                options.Model,
-                defaultModelFromStore,
-                resumed?.Model);
-        }
-        else
-        {
-            sessionTarget = AiProviderSelection.ResolveSessionTarget(
-                options.Provider ?? defaultProviderFromStore,
-                options.Model ?? defaultModelFromStore,
-                resumed?.SourceSession.Provider,
-                resumed?.Model);
-        }
-        var aiProvider = sessionTarget.Provider;
-        var model = sessionTarget.Model;
+        // Resolve the provider/model target plus any active NyxID AI-Service
+        // proxy routing from the CLI flags, stored defaults, and resume hints.
+        // Precedence rules live in AiProviderSelection.PlanSession (Core).
+        var sessionPlan = AiProviderSelection.PlanSession(
+            cliProvider: options.Provider,
+            cliModel: options.Model,
+            storedDefaultProvider: storedCredentials?.DefaultProvider,
+            storedDefaultModel: storedCredentials?.DefaultModel,
+            storedDefaultProxySlug: storedCredentials?.DefaultProxySlug,
+            storedDefaultProxyLabel: storedCredentials?.DefaultProxyLabel,
+            isResume: resumed != null,
+            resumedProvider: resumed?.SourceSession.Provider,
+            resumedModel: resumed?.Model);
+        var activeProxySlug = sessionPlan.ProxyServiceSlug;
+        var activeProxyLabel = sessionPlan.ProxyServiceLabel;
+        var aiProvider = sessionPlan.Target.Provider;
+        var model = sessionPlan.Target.Model;
 
         var config = new QueryEngineConfig
         {
