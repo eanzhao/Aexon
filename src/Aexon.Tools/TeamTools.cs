@@ -55,9 +55,10 @@ public sealed class TeamCreateTool : ITool
 {
     private readonly IAgentTeamRuntime _runtime;
 
-    public TeamCreateTool(IAgentTeamRuntime? runtime = null)
+    public TeamCreateTool(IAgentTeamRuntime runtime)
     {
-        _runtime = runtime ?? TeamToolDefaults.Default;
+        ArgumentNullException.ThrowIfNull(runtime);
+        _runtime = runtime;
     }
 
     public string Name => "TeamCreate";
@@ -150,9 +151,10 @@ public sealed class TeamStatusTool : ITool
 {
     private readonly IAgentTeamRuntime _runtime;
 
-    public TeamStatusTool(IAgentTeamRuntime? runtime = null)
+    public TeamStatusTool(IAgentTeamRuntime runtime)
     {
-        _runtime = runtime ?? TeamToolDefaults.Default;
+        ArgumentNullException.ThrowIfNull(runtime);
+        _runtime = runtime;
     }
 
     public string Name => "TeamStatus";
@@ -214,9 +216,10 @@ public sealed class TeamDissolveTool : ITool
 {
     private readonly IAgentTeamRuntime _runtime;
 
-    public TeamDissolveTool(IAgentTeamRuntime? runtime = null)
+    public TeamDissolveTool(IAgentTeamRuntime runtime)
     {
-        _runtime = runtime ?? TeamToolDefaults.Default;
+        ArgumentNullException.ThrowIfNull(runtime);
+        _runtime = runtime;
     }
 
     public string Name => "TeamDissolve";
@@ -277,9 +280,4 @@ public sealed class TeamDissolveTool : ITool
 
         return Task.FromResult(ToolResult.Success(TeamFormatter.FormatDissolveResult(team, parsed.Reason)));
     }
-}
-
-internal static class TeamToolDefaults
-{
-    public static IAgentTeamRuntime Default { get; } = new InMemoryAgentTeamRuntime();
 }

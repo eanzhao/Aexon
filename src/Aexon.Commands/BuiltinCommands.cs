@@ -1155,7 +1155,9 @@ public class TeamCommand : ICommand
     }
 
     private IAgentTeamRuntime ResolveRuntime(CommandContext context) =>
-        _runtime ?? context.AgentTeamRuntime ?? TeamCommandDefaults.Default;
+        _runtime ?? context.AgentTeamRuntime
+        ?? throw new InvalidOperationException(
+            "The /team command requires an IAgentTeamRuntime, but none was supplied by the command or its CommandContext.");
 
     private static string FormatCreateResult(AgentTeam team) =>
         $"Team created: {team.Id}\n{AgentTeamStatusFormatter.FormatDetails(team)}";
@@ -1287,11 +1289,6 @@ public sealed class TeamCommandCreateInput
     public string? Lead { get; set; }
     public string? Description { get; set; }
     public string[]? Members { get; set; }
-}
-
-internal static class TeamCommandDefaults
-{
-    public static IAgentTeamRuntime Default { get; } = new InMemoryAgentTeamRuntime();
 }
 
 /// <summary>
@@ -1563,12 +1560,9 @@ public class MailboxCommand : ICommand
     }
 
     private IAgentMessageRuntime ResolveRuntime(CommandContext context) =>
-        _runtime ?? context.AgentMessageRuntime ?? MailboxCommandDefaults.Default;
-}
-
-internal static class MailboxCommandDefaults
-{
-    public static IAgentMessageRuntime Default { get; } = new InMemoryAgentMessageRuntime();
+        _runtime ?? context.AgentMessageRuntime
+        ?? throw new InvalidOperationException(
+            "The /mailbox command requires an IAgentMessageRuntime, but none was supplied by the command or its CommandContext.");
 }
 
 /// <summary>
