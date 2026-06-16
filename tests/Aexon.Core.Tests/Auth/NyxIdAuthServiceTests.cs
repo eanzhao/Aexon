@@ -99,7 +99,7 @@ public sealed class NyxIdAuthServiceTests
             });
         var service = new NyxIdAuthService(
             new HttpClient(handler),
-            new NyxIdCredentialStore(temp.FullPath("nyxid.json")));
+            new NyxIdCredentialStore(temp.FullPath("nyxid.json"), temp.FullPath("preferences.json")));
 
         var credentials = await service.RefreshAsync("https://nyx.example/", "old-refresh");
 
@@ -135,7 +135,7 @@ public sealed class NyxIdAuthServiceTests
             });
         var service = new NyxIdAuthService(
             new HttpClient(handler),
-            new NyxIdCredentialStore(temp.FullPath("nyxid.json")));
+            new NyxIdCredentialStore(temp.FullPath("nyxid.json"), temp.FullPath("preferences.json")));
 
         var credentials = await service.RefreshAsync("https://nyx.example", "keep-me");
 
@@ -146,7 +146,7 @@ public sealed class NyxIdAuthServiceTests
     public async Task LogoutAsync_PostsBearerTokenAndClearsLocalCredentials()
     {
         using var temp = new TempDirectory();
-        var store = new NyxIdCredentialStore(temp.FullPath("nyxid.json"));
+        var store = new NyxIdCredentialStore(temp.FullPath("nyxid.json"), temp.FullPath("preferences.json"));
         store.Save(new NyxIdCredentials
         {
             BaseUrl = "https://nyx.example",

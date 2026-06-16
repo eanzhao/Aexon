@@ -83,7 +83,9 @@ public sealed class NyxIdChatClientTests
 
     private static NyxIdTokenProvider CreateTokenProvider(TempDirectory temp, string accessToken)
     {
-        var store = new NyxIdCredentialStore(temp.FullPath($"{accessToken}.json"));
+        var store = new NyxIdCredentialStore(
+            temp.FullPath($"{accessToken}.json"),
+            temp.FullPath($"{accessToken}.preferences.json"));
         store.Save(new NyxIdCredentials
         {
             BaseUrl = "https://nyx.example",

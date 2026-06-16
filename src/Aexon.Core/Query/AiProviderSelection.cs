@@ -18,6 +18,15 @@ public sealed record AiSessionTarget(
     string Model);
 
 /// <summary>
+/// Represents the fully-resolved plan for a session: the provider/model target
+/// plus any active NyxID AI-Service proxy routing derived from stored defaults.
+/// </summary>
+public sealed record AiSessionPlan(
+    AiSessionTarget Target,
+    string? ProxyServiceSlug,
+    string? ProxyServiceLabel);
+
+/// <summary>
 /// Centralizes provider detection and model resolution rules.
 /// </summary>
 public static class AiProviderSelection
@@ -73,6 +82,54 @@ public static class AiProviderSelection
         var provider = DetectProvider(providerFlag, modelInput, persistedProvider);
         var model = ResolveModel(modelInput, provider);
         return new AiSessionTarget(provider, model);
+    }
+
+    /// <summary>
+    /// Resolves the full session plan — provider/model target plus any active
+    /// NyxID AI-Service proxy routing — from the CLI flags, the stored NyxID
+    /// defaults, and any resumed-session hints. An explicit <c>--provider</c> /
+    /// <c>--model</c> flag always beats a stored proxy default; absent overrides,
+    /// a stored proxy slug forces OpenAI-compatible routing through
+    /// <c>/api/v1/proxy/s/{slug}/v1/</c>. Stored default models apply only to a
+    /// fresh (non-resumed) session that did not pass an explicit model.
+    /// </summary>
+    public static AiSessionPlan PlanSession(
+        string? cliProvider,
+        string? cliModel,
+        string? storedDefaultProvider,
+        string? storedDefaultModel,
+        string? storedDefaultProxySlug,
+        string? storedDefaultProxyLabel,
+        bool isResume,
+        string? resumedProvider,
+        string? resumedModel)
+    {
+        var defaultProviderFromStore = string.IsNullOrWhiteSpace(storedDefaultProvider)
+            ? null
+            : storedDefaultProvider;
+        var defaultModelFromStore = !isResume &&
+                                    string.IsNullOrWhiteSpace(cliModel) &&
+                                    !string.IsNullOrWhiteSpace(storedDefaultModel)
+            ? storedDefaultModel
+            : null;
+
+        var activeProxySlug = string.IsNullOrWhiteSpace(cliProvider) &&
+                              !string.IsNullOrWhiteSpace(storedDefaultProxySlug)
+            ? storedDefaultProxySlug
+            : null;
+        var activeProxyLabel = activeProxySlug != null
+            ? storedDefaultProxyLabel
+            : null;
+
+        var target = activeProxySlug != null
+            ? ResolveSessionTargetForProxyService(cliModel, defaultModelFromStore, resumedModel)
+            : ResolveSessionTarget(
+                cliProvider ?? defaultProviderFromStore,
+                cliModel ?? defaultModelFromStore,
+                resumedProvider,
+                resumedModel);
+
+        return new AiSessionPlan(target, activeProxySlug, activeProxyLabel);
     }
 
     public static AiProvider DetectProvider(

@@ -251,14 +251,15 @@ public static class AgentStatusFormatter
         var normalizedLimit = limit.HasValue
             ? Math.Max(1, limit.Value)
             : int.MaxValue;
-        var entries = run.Output
+        var output = run.Output;
+        var entries = output
             .Skip(normalizedOffset)
             .Take(normalizedLimit)
             .ToArray();
 
         page = new AgentBackgroundRunOutputPage(
             normalizedOffset,
-            run.Output.Count,
+            output.Count,
             entries);
         error = null;
         return true;
@@ -384,20 +385,24 @@ public static class AgentStatusFormatter
         if (!string.IsNullOrWhiteSpace(run.StopReason))
             builder.AppendLine($"Stop reason: {run.StopReason}");
 
-        if (includeOutput && run.Output.Count > 0)
+        if (includeOutput)
         {
-            builder.AppendLine();
-            builder.AppendLine("Output:");
-            builder.AppendLine(FormatOutputPage(
-                run,
-                new AgentBackgroundRunOutputPage(
-                    Math.Max(0, outputOffset ?? 0),
-                    run.Output.Count,
-                    run.Output
-                        .Skip(Math.Max(0, outputOffset ?? 0))
-                        .Take(outputLimit.HasValue ? Math.Max(1, outputLimit.Value) : int.MaxValue)
-                        .ToArray()),
-                includeRunHeader: false));
+            var output = run.Output;
+            if (output.Count > 0)
+            {
+                builder.AppendLine();
+                builder.AppendLine("Output:");
+                builder.AppendLine(FormatOutputPage(
+                    run,
+                    new AgentBackgroundRunOutputPage(
+                        Math.Max(0, outputOffset ?? 0),
+                        output.Count,
+                        output
+                            .Skip(Math.Max(0, outputOffset ?? 0))
+                            .Take(outputLimit.HasValue ? Math.Max(1, outputLimit.Value) : int.MaxValue)
+                            .ToArray()),
+                    includeRunHeader: false));
+            }
         }
 
         return builder.ToString().TrimEnd();

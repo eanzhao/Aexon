@@ -50,10 +50,17 @@ public sealed class AevatarCommand(
 
     public async Task ExecuteAsync(string args, CommandContext context)
     {
-        var trimmed = (args ?? string.Empty).Trim();
+        var (endpointOverride, trimmed, parseError) = ParseInvocationOptions(args);
+        if (parseError is not null)
+        {
+            context.WriteLine(parseError);
+            context.WriteLine("  Usage: /aevatar [--endpoint <url>] <message|subcommand>");
+            return;
+        }
+
         if (trimmed.Length == 0)
         {
-            await RunReplAsync(context);
+            await RunReplAsync(context, endpointOverride);
             return;
         }
 
@@ -61,23 +68,23 @@ public sealed class AevatarCommand(
         switch (head.ToLowerInvariant())
         {
             case "config":
-                HandleConfig(rest, context);
+                HandleConfig(rest, context, endpointOverride);
                 return;
 
             case "new":
-                await CreateConversationAsync(rest, context);
+                await CreateConversationAsync(rest, context, endpointOverride);
                 return;
 
             case "list":
-                await ListHistoryAsync(context);
+                await ListHistoryAsync(context, endpointOverride);
                 return;
 
             case "open":
-                await OpenConversationAsync(rest, context);
+                await OpenConversationAsync(rest, context, endpointOverride);
                 return;
 
             case "delete":
-                await DeleteConversationAsync(rest, context);
+                await DeleteConversationAsync(rest, context, endpointOverride);
                 return;
 
             case "help":
@@ -87,41 +94,42 @@ public sealed class AevatarCommand(
                 return;
 
             case "send":
-                await SendOneShotAsync(rest, context);
+                await SendOneShotAsync(rest, context, endpointOverride);
                 return;
 
             case "chat":
-                await RunChatWebAsync(rest, context);
+                await RunChatWebAsync(rest, context, endpointOverride);
                 return;
 
             case "web":
-                await RunWebAsync(rest, context);
+                await RunWebAsync(rest, context, endpointOverride);
                 return;
 
             default:
                 // Treat bare `/aevatar <message>` as send.
-                await SendOneShotAsync(trimmed, context);
+                await SendOneShotAsync(trimmed, context, endpointOverride);
                 return;
         }
     }
 
     // ── Web UI subcommands ──
 
-    private async Task RunWebAsync(string args, CommandContext context)
+    private async Task RunWebAsync(string args, CommandContext context, string? endpointOverride)
     {
         const int defaultPort = 6689;
         const string webRootSubdir = "aevatar-workbench";
 
-        var (port, noBrowser, error) = ParseWebFlags(args, defaultPort);
+        var (port, noBrowser, parsedEndpointOverride, error) = ParseWebFlags(args, defaultPort);
         if (error is not null)
         {
             context.WriteLine(error);
-            context.WriteLine("  Usage: /aevatar web [--port <n>] [--no-browser]");
+            context.WriteLine("  Usage: /aevatar web [--endpoint <url>] [--port <n>] [--no-browser]");
             return;
         }
 
         var settings = settingsStore.Load();
-        var baseUrl = AevatarChatSettingsStore.ResolveBaseUrl(settings, @override: null);
+        var effectiveEndpoint = parsedEndpointOverride ?? endpointOverride;
+        var baseUrl = AevatarChatSettingsStore.ResolveBaseUrl(settings, effectiveEndpoint);
 
         try
         {
@@ -133,21 +141,22 @@ public sealed class AevatarCommand(
         }
     }
 
-    private async Task RunChatWebAsync(string args, CommandContext context)
+    private async Task RunChatWebAsync(string args, CommandContext context, string? endpointOverride)
     {
         const int defaultPort = 6688;
         const string webRootSubdir = "aevatar-chat";
 
-        var (port, noBrowser, error) = ParseWebFlags(args, defaultPort);
+        var (port, noBrowser, parsedEndpointOverride, error) = ParseWebFlags(args, defaultPort);
         if (error is not null)
         {
             context.WriteLine(error);
-            context.WriteLine("  Usage: /aevatar chat [--port <n>] [--no-browser]");
+            context.WriteLine("  Usage: /aevatar chat [--endpoint <url>] [--port <n>] [--no-browser]");
             return;
         }
 
         var settings = settingsStore.Load();
-        var baseUrl = AevatarChatSettingsStore.ResolveBaseUrl(settings, @override: null);
+        var effectiveEndpoint = parsedEndpointOverride ?? endpointOverride;
+        var baseUrl = AevatarChatSettingsStore.ResolveBaseUrl(settings, effectiveEndpoint);
 
         try
         {
@@ -159,13 +168,14 @@ public sealed class AevatarCommand(
         }
     }
 
-    internal static (int Port, bool NoBrowser, string? Error) ParseWebFlags(string args, int defaultPort)
+    internal static (int Port, bool NoBrowser, string? EndpointOverride, string? Error) ParseWebFlags(string args, int defaultPort)
     {
         var port = defaultPort;
         var noBrowser = false;
+        string? endpointOverride = null;
 
         if (string.IsNullOrWhiteSpace(args))
-            return (port, noBrowser, null);
+            return (port, noBrowser, endpointOverride, null);
 
         var tokens = args.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         for (var i = 0; i < tokens.Length; i++)
@@ -182,7 +192,7 @@ public sealed class AevatarCommand(
                 if (!int.TryParse(tokens[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out port) ||
                     port is < 1 or > 65535)
                 {
-                    return (0, false, $"  Invalid --port value: {tokens[i + 1]}");
+                    return (0, false, null, $"  Invalid --port value: {tokens[i + 1]}");
                 }
 
                 i++;
@@ -195,28 +205,55 @@ public sealed class AevatarCommand(
                 if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out port) ||
                     port is < 1 or > 65535)
                 {
-                    return (0, false, $"  Invalid --port value: {value}");
+                    return (0, false, null, $"  Invalid --port value: {value}");
                 }
 
                 continue;
             }
 
-            return (0, false, $"  Unknown flag: {token}");
+            if (token == "--endpoint")
+            {
+                if (endpointOverride is not null)
+                    return (0, false, null, "  --endpoint can only be passed once");
+
+                if (i + 1 >= tokens.Length)
+                    return (0, false, null, "  Missing --endpoint value");
+
+                endpointOverride = NormalizeEndpointOverride(tokens[++i], out var endpointError);
+                if (endpointError is not null)
+                    return (0, false, null, endpointError);
+
+                continue;
+            }
+
+            if (token.StartsWith("--endpoint=", StringComparison.Ordinal))
+            {
+                if (endpointOverride is not null)
+                    return (0, false, null, "  --endpoint can only be passed once");
+
+                endpointOverride = NormalizeEndpointOverride(token["--endpoint=".Length..], out var endpointError);
+                if (endpointError is not null)
+                    return (0, false, null, endpointError);
+
+                continue;
+            }
+
+            return (0, false, null, $"  Unknown flag: {token}");
         }
 
-        return (port, noBrowser, null);
+        return (port, noBrowser, endpointOverride, null);
     }
 
     // ── Config (unchanged) ──
 
-    private void HandleConfig(string args, CommandContext context)
+    private void HandleConfig(string args, CommandContext context, string? endpointOverride)
     {
         var (sub, rest) = SplitHead(args);
         switch (sub.ToLowerInvariant())
         {
             case "":
             case "show":
-                ShowConfig(context);
+                ShowConfig(context, endpointOverride);
                 return;
 
             case "set-url":
@@ -268,18 +305,28 @@ public sealed class AevatarCommand(
         }
     }
 
-    private void ShowConfig(CommandContext context)
+    private void ShowConfig(CommandContext context, string? endpointOverride)
     {
         var settings = settingsStore.Load();
-        var baseUrl = string.IsNullOrWhiteSpace(settings.BaseUrl)
+        var persistedBaseUrl = string.IsNullOrWhiteSpace(settings.BaseUrl)
             ? $"{AevatarChatSettingsStore.MainnetBaseUrl} (mainnet default)"
             : settings.BaseUrl!;
+        var effectiveBaseUrl = AevatarChatSettingsStore.ResolveBaseUrl(settings, endpointOverride);
         var scope = string.IsNullOrWhiteSpace(settings.ScopeId)
             ? AevatarChatSettingsStore.DefaultScopeId + " (default)"
             : settings.ScopeId!;
         var actor = string.IsNullOrWhiteSpace(settings.LastActorId) ? "(none)" : settings.LastActorId!;
 
-        context.WriteLine($"  Base URL:     {baseUrl}");
+        if (string.IsNullOrWhiteSpace(endpointOverride))
+        {
+            context.WriteLine($"  Base URL:     {persistedBaseUrl}");
+        }
+        else
+        {
+            context.WriteLine($"  Base URL:     {effectiveBaseUrl} (this invocation only)");
+            context.WriteLine($"  Saved URL:    {persistedBaseUrl}");
+        }
+
         context.WriteLine($"  Scope:        {scope}");
         context.WriteLine($"  Last actor:   {actor}");
         context.WriteLine($"  Config file:  {settingsStore.FilePath}");
@@ -287,9 +334,9 @@ public sealed class AevatarCommand(
 
     // ── Conversation subcommands ──
 
-    private async Task CreateConversationAsync(string args, CommandContext context)
+    private async Task CreateConversationAsync(string args, CommandContext context, string? endpointOverride)
     {
-        if (!TryBuildClient(context, out var client, out var scopeId, out var settings))
+        if (!TryBuildClient(context, endpointOverride, out var client, out var scopeId, out var settings))
             return;
 
         try
@@ -326,9 +373,9 @@ public sealed class AevatarCommand(
         }
     }
 
-    private async Task ListHistoryAsync(CommandContext context)
+    private async Task ListHistoryAsync(CommandContext context, string? endpointOverride)
     {
-        if (!TryBuildClient(context, out var client, out var scopeId, out var settings))
+        if (!TryBuildClient(context, endpointOverride, out var client, out var scopeId, out var settings))
             return;
 
         try
@@ -406,7 +453,7 @@ public sealed class AevatarCommand(
         return $"{visible[..8]}…{visible[^4..]}";
     }
 
-    private async Task OpenConversationAsync(string args, CommandContext context)
+    private async Task OpenConversationAsync(string args, CommandContext context, string? endpointOverride)
     {
         var input = args.Trim();
         if (string.IsNullOrWhiteSpace(input))
@@ -415,7 +462,7 @@ public sealed class AevatarCommand(
             return;
         }
 
-        if (!TryBuildClient(context, out var client, out var scopeId, out var settings))
+        if (!TryBuildClient(context, endpointOverride, out var client, out var scopeId, out var settings))
             return;
 
         try
@@ -431,7 +478,7 @@ public sealed class AevatarCommand(
             PrintTranscript(messages, context);
 
             if (!Console.IsInputRedirected)
-                await DriveReplAsync(client!, scopeId, settings! with { LastActorId = resolvedId }, context);
+                await DriveReplAsync(client!, scopeId, settings! with { LastActorId = resolvedId }, context, endpointOverride);
         }
         catch (Exception ex)
         {
@@ -494,9 +541,9 @@ public sealed class AevatarCommand(
         return matches[0].Id;
     }
 
-    private async Task DeleteConversationAsync(string args, CommandContext context)
+    private async Task DeleteConversationAsync(string args, CommandContext context, string? endpointOverride)
     {
-        if (!TryBuildClient(context, out var client, out var scopeId, out var settings))
+        if (!TryBuildClient(context, endpointOverride, out var client, out var scopeId, out var settings))
             return;
 
         try
@@ -542,7 +589,7 @@ public sealed class AevatarCommand(
         }
     }
 
-    private async Task SendOneShotAsync(string message, CommandContext context)
+    private async Task SendOneShotAsync(string message, CommandContext context, string? endpointOverride)
     {
         var prompt = message?.Trim() ?? string.Empty;
         if (prompt.Length == 0)
@@ -551,7 +598,7 @@ public sealed class AevatarCommand(
             return;
         }
 
-        if (!TryBuildClient(context, out var client, out var scopeId, out var settings))
+        if (!TryBuildClient(context, endpointOverride, out var client, out var scopeId, out var settings))
             return;
 
         try
@@ -574,7 +621,7 @@ public sealed class AevatarCommand(
 
     // ── REPL ──
 
-    private async Task RunReplAsync(CommandContext context)
+    private async Task RunReplAsync(CommandContext context, string? endpointOverride)
     {
         if (Console.IsInputRedirected)
         {
@@ -584,12 +631,12 @@ public sealed class AevatarCommand(
             return;
         }
 
-        if (!TryBuildClient(context, out var client, out var scopeId, out var settings))
+        if (!TryBuildClient(context, endpointOverride, out var client, out var scopeId, out var settings))
             return;
 
         try
         {
-            await DriveReplAsync(client!, scopeId, settings!, context);
+            await DriveReplAsync(client!, scopeId, settings!, context, endpointOverride);
         }
         finally
         {
@@ -601,7 +648,8 @@ public sealed class AevatarCommand(
         AevatarChatClient client,
         string scopeId,
         AevatarChatSettings settings,
-        CommandContext context)
+        CommandContext context,
+        string? endpointOverride)
     {
         RenderReplBanner(client.BaseAddress.ToString().TrimEnd('/'), scopeId);
 
@@ -641,7 +689,7 @@ public sealed class AevatarCommand(
 
             if (trimmed.StartsWith(':'))
             {
-                var outcome = await HandleReplCommandAsync(trimmed, context, client, scopeId, session);
+                var outcome = await HandleReplCommandAsync(trimmed, context, client, scopeId, session, endpointOverride);
                 if (outcome.Session is { } newSession)
                     session = newSession;
                 if (outcome.Exit)
@@ -681,7 +729,8 @@ public sealed class AevatarCommand(
         CommandContext context,
         AevatarChatClient client,
         string scopeId,
-        ChatSession? currentSession)
+        ChatSession? currentSession,
+        string? endpointOverride)
     {
         var (head, rest) = SplitHead(line[1..]);
         switch (head.ToLowerInvariant())
@@ -708,7 +757,7 @@ public sealed class AevatarCommand(
                 }
 
             case "config":
-                ShowConfig(context);
+                ShowConfig(context, endpointOverride);
                 return ReplOutcome.Continue;
 
             case "new":
@@ -1106,13 +1155,14 @@ public sealed class AevatarCommand(
 
     private bool TryBuildClient(
         CommandContext context,
+        string? endpointOverride,
         out AevatarChatClient? client,
         out string scopeId,
         out AevatarChatSettings? settings)
     {
         _ = context;
         settings = settingsStore.Load();
-        var baseUrl = AevatarChatSettingsStore.ResolveBaseUrl(settings, @override: null);
+        var baseUrl = AevatarChatSettingsStore.ResolveBaseUrl(settings, endpointOverride);
         scopeId = AevatarChatSettingsStore.ResolveScopeId(settings, @override: null);
         client = new AevatarChatClient(baseUrl, tokenProvider);
         return true;
@@ -1199,6 +1249,71 @@ public sealed class AevatarCommand(
         return trimmed.Trim('"');
     }
 
+    internal static (string? EndpointOverride, string RemainingArgs, string? Error) ParseInvocationOptions(string? args)
+    {
+        if (string.IsNullOrWhiteSpace(args))
+            return (null, string.Empty, null);
+
+        var tokens = args.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        string? endpointOverride = null;
+        var index = 0;
+
+        while (index < tokens.Length)
+        {
+            var token = tokens[index];
+            if (token == "--endpoint")
+            {
+                if (endpointOverride is not null)
+                    return (null, string.Empty, "  --endpoint can only be passed once");
+
+                if (index + 1 >= tokens.Length)
+                    return (null, string.Empty, "  Missing --endpoint value");
+
+                endpointOverride = NormalizeEndpointOverride(tokens[index + 1], out var error);
+                if (error is not null)
+                    return (null, string.Empty, error);
+
+                index += 2;
+                continue;
+            }
+
+            if (token.StartsWith("--endpoint=", StringComparison.Ordinal))
+            {
+                if (endpointOverride is not null)
+                    return (null, string.Empty, "  --endpoint can only be passed once");
+
+                endpointOverride = NormalizeEndpointOverride(token["--endpoint=".Length..], out var error);
+                if (error is not null)
+                    return (null, string.Empty, error);
+
+                index++;
+                continue;
+            }
+
+            break;
+        }
+
+        var remainingArgs = index >= tokens.Length
+            ? string.Empty
+            : string.Join(' ', tokens[index..]);
+        return (endpointOverride, remainingArgs, null);
+    }
+
+    private static string? NormalizeEndpointOverride(string rawValue, out string? error)
+    {
+        var normalized = AevatarChatSettingsStore.NormalizeBaseUrl(rawValue);
+        if (normalized is null)
+        {
+            error = string.IsNullOrWhiteSpace(rawValue)
+                ? "  Missing --endpoint value"
+                : $"  Invalid --endpoint value: {rawValue}";
+            return null;
+        }
+
+        error = null;
+        return normalized;
+    }
+
     private static void WriteError(CommandContext context, Exception ex)
     {
         _ = context;
@@ -1222,18 +1337,19 @@ public sealed class AevatarCommand(
     private static void PrintUsage(CommandContext context)
     {
         context.WriteLine("  Usage:");
-        context.WriteLine("    /aevatar                                open a REPL (mainnet by default)");
-        context.WriteLine("    /aevatar <message>                      send + stream in the current conversation");
-        context.WriteLine("    /aevatar new [title]                    create a new conversation and make it active");
-        context.WriteLine("    /aevatar list                           show saved conversations in the current scope");
-        context.WriteLine("    /aevatar open <id>                      switch to a saved conversation + show transcript");
-        context.WriteLine("    /aevatar delete [id]                    delete a conversation (default: active one)");
+        context.WriteLine("    /aevatar [--endpoint <url>]             open a REPL (mainnet by default)");
+        context.WriteLine("    /aevatar [--endpoint <url>] <message>   send + stream in the current conversation");
+        context.WriteLine("    /aevatar [--endpoint <url>] new [title] create a new conversation and make it active");
+        context.WriteLine("    /aevatar [--endpoint <url>] list        show saved conversations in the current scope");
+        context.WriteLine("    /aevatar [--endpoint <url>] open <id>   switch to a saved conversation + show transcript");
+        context.WriteLine("    /aevatar [--endpoint <url>] delete [id] delete a conversation (default: active one)");
         context.WriteLine("    /aevatar config show                    print persisted config");
         context.WriteLine("    /aevatar config set-url <url>           persist aevatar API base URL");
         context.WriteLine("    /aevatar config set-scope <scopeId>     persist scope id");
         context.WriteLine("    /aevatar config clear                   clear persisted base URL");
-        context.WriteLine("    /aevatar chat [--port N] [--no-browser]   start chat-only web UI (default port 6688)");
-        context.WriteLine("    /aevatar web  [--port N] [--no-browser]   start Service Workbench prototype (default port 6689)");
+        context.WriteLine("    /aevatar chat [--endpoint <url>] [--port N] [--no-browser]   start chat-only web UI (default port 6688)");
+        context.WriteLine("    /aevatar web  [--endpoint <url>] [--port N] [--no-browser]   start Service Workbench prototype (default port 6689)");
+        context.WriteLine("    --endpoint <url>                      use this aevatar base URL for this invocation only");
     }
 
     internal static (string head, string rest) SplitHead(string value)

@@ -111,4 +111,67 @@ public sealed class AevatarCommandHelpersTests
         Assert.Equal("my title", AevatarCommand.ExtractTitleFlag("--title \"my title\""));
         Assert.Equal("my title", AevatarCommand.ExtractTitleFlag("\"my title\""));
     }
+
+    // ── ParseInvocationOptions ──
+
+    [Fact]
+    public void ParseInvocationOptions_ReturnsEmptyWhenArgsMissing()
+    {
+        var (endpoint, remaining, error) = AevatarCommand.ParseInvocationOptions(null);
+
+        Assert.Null(endpoint);
+        Assert.Equal(string.Empty, remaining);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void ParseInvocationOptions_ParsesEndpointWithSeparateValue()
+    {
+        var (endpoint, remaining, error) =
+            AevatarCommand.ParseInvocationOptions("--endpoint https://api.aevatar.local/v1 hello world");
+
+        Assert.Equal("https://api.aevatar.local/v1", endpoint);
+        Assert.Equal("hello world", remaining);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void ParseInvocationOptions_ParsesEndpointWithEqualsSyntax()
+    {
+        var (endpoint, remaining, error) =
+            AevatarCommand.ParseInvocationOptions("--endpoint=https://api.aevatar.local/ list");
+
+        Assert.Equal("https://api.aevatar.local", endpoint);
+        Assert.Equal("list", remaining);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void ParseInvocationOptions_StopsConsumingAfterFirstPositionalToken()
+    {
+        var (endpoint, remaining, error) =
+            AevatarCommand.ParseInvocationOptions("--endpoint https://api.aevatar.local web --port 7000");
+
+        Assert.Equal("https://api.aevatar.local", endpoint);
+        Assert.Equal("web --port 7000", remaining);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void ParseInvocationOptions_RejectsMissingEndpointValue()
+    {
+        var (_, _, error) = AevatarCommand.ParseInvocationOptions("--endpoint");
+
+        Assert.NotNull(error);
+        Assert.Contains("Missing --endpoint value", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseInvocationOptions_RejectsInvalidEndpointValue()
+    {
+        var (_, _, error) = AevatarCommand.ParseInvocationOptions("--endpoint not-a-url hi");
+
+        Assert.NotNull(error);
+        Assert.Contains("Invalid --endpoint value", error, StringComparison.Ordinal);
+    }
 }

@@ -460,7 +460,7 @@ public sealed class BuiltinCommandsTests
         using var temp = new TempDirectory();
         using var bundle = CreateEngineBundle(temp.Root);
         var lines = new List<string>();
-        var credentialStore = new NyxIdCredentialStore(temp.FullPath("nyxid.json"));
+        var credentialStore = new NyxIdCredentialStore(temp.FullPath("nyxid.json"), temp.FullPath("preferences.json"));
         credentialStore.Save(new NyxIdCredentials
         {
             BaseUrl = "https://nyx.active.test",
@@ -587,7 +587,7 @@ public sealed class BuiltinCommandsTests
         using var temp = new TempDirectory();
         using var bundle = CreateEngineBundle(temp.Root);
         var lines = new List<string>();
-        var credentialStore = new NyxIdCredentialStore(temp.FullPath("nyxid.json"));
+        var credentialStore = new NyxIdCredentialStore(temp.FullPath("nyxid.json"), temp.FullPath("preferences.json"));
         credentialStore.Save(new NyxIdCredentials
         {
             BaseUrl = "https://nyx.active.test",
