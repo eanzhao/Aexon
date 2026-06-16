@@ -82,7 +82,7 @@ public sealed class AevatarChatSettingsStore
 
         var normalized = settings with
         {
-            BaseUrl = Normalize(settings.BaseUrl),
+            BaseUrl = NormalizeBaseUrl(settings.BaseUrl),
             ScopeId = string.IsNullOrWhiteSpace(settings.ScopeId) ? null : settings.ScopeId.Trim(),
             LastActorId = string.IsNullOrWhiteSpace(settings.LastActorId) ? null : settings.LastActorId.Trim(),
         };
@@ -109,10 +109,14 @@ public sealed class AevatarChatSettingsStore
     public static string ResolveBaseUrl(AevatarChatSettings settings, string? @override)
     {
         var candidate = string.IsNullOrWhiteSpace(@override) ? settings.BaseUrl : @override;
-        return Normalize(candidate) ?? MainnetBaseUrl;
+        return NormalizeBaseUrl(candidate) ?? MainnetBaseUrl;
     }
 
-    private static string? Normalize(string? value)
+    /// <summary>
+    /// Validates and normalizes an aevatar base URL for both persisted settings
+    /// and per-invocation overrides.
+    /// </summary>
+    public static string? NormalizeBaseUrl(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
             return null;

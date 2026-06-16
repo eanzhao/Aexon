@@ -170,6 +170,7 @@ Aevatar — chat with the backend and launch the workflow studio:
 
 ```bash
 aexon aevatar                              # REPL on the current conversation (mainnet by default)
+aexon aevatar --endpoint <url>            # use a specific Aevatar endpoint for this invocation only
 aexon aevatar "draft a short summary"      # send + stream in the active conversation
 aexon aevatar new [title]                  # create a new conversation
 aexon aevatar list                         # list conversations in the current scope
@@ -178,7 +179,8 @@ aexon aevatar delete [id]                  # delete a conversation (defaults to 
 aexon aevatar config show                  # show/change base URL + scope
 aexon aevatar config set-url <url>
 aexon aevatar config set-scope <scopeId>
-aexon aevatar web [--port N] [--no-browser]   # in-process Aevatar workflow studio with /api/* reverse-proxy
+aexon aevatar chat [--endpoint <url>] [--port N] [--no-browser]
+aexon aevatar web [--endpoint <url>] [--port N] [--no-browser]   # in-process Aevatar workflow studio with /api/* reverse-proxy
 ```
 
 Chrono-Storage — read and write objects via Aevatar's explorer proxy:
