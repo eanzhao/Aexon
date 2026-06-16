@@ -35,7 +35,13 @@ public sealed class PersistentAgentRemoteTriggerRuntimeTests
             runtime,
             TimeSpan.FromMilliseconds(10));
 
-        await WaitForAsync(() => tasks.ListBackgroundRuns().Count == 1);
+        // The scheduler records a fire in stages: it starts the background run
+        // (making it visible here) and only afterwards stamps LastTriggeredAt on
+        // the trigger. Wait for the last stage so all three assertions observe a
+        // fully recorded fire rather than a half-applied one.
+        await WaitForAsync(() =>
+            tasks.ListBackgroundRuns().Count == 1 &&
+            runtime.GetTrigger("trigger-1")?.LastTriggeredAt is not null);
 
         var run = Assert.Single(tasks.ListBackgroundRuns());
         Assert.Contains(run.Output, line => line.Contains("trigger-1", StringComparison.Ordinal));

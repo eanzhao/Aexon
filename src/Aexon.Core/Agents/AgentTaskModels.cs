@@ -97,6 +97,7 @@ public sealed class AgentWorkItem
 /// </summary>
 public sealed class AgentBackgroundRun
 {
+    private readonly object _outputGate = new();
     private readonly List<string> _output = [];
 
     public required string Id { get; init; }
@@ -111,15 +112,28 @@ public sealed class AgentBackgroundRun
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? StoppedAt { get; set; }
 
-    public IReadOnlyList<string> Output => _output;
+    /// <summary>
+    /// Streamed output entries. Producers append while monitors read these
+    /// concurrently, so access is guarded and reads return an immutable
+    /// snapshot rather than the live backing list.
+    /// </summary>
+    public IReadOnlyList<string> Output
+    {
+        get
+        {
+            lock (_outputGate)
+                return _output.ToArray();
+        }
+    }
 
     public void AppendOutput(string chunk)
     {
-        if (!string.IsNullOrWhiteSpace(chunk))
-        {
+        if (string.IsNullOrWhiteSpace(chunk))
+            return;
+
+        lock (_outputGate)
             _output.Add(chunk);
-            UpdatedAt = DateTimeOffset.UtcNow;
-        }
+        UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     public void Stop(string? reason = null) =>
@@ -191,7 +205,7 @@ public sealed class AgentBackgroundRun
             StoppedAt = StoppedAt,
         };
 
-        foreach (var chunk in _output)
+        foreach (var chunk in Output)
             clone.AppendOutput(chunk);
 
         clone.UpdatedAt = UpdatedAt;

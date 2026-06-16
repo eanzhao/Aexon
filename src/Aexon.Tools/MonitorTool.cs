@@ -125,6 +125,20 @@ public sealed class MonitorTool : ITool
         var startedAt = DateTimeOffset.UtcNow;
         var emittedLineCount = 0;
 
+        int Emit(AgentBackgroundRunOutputPage page)
+        {
+            foreach (var entry in page.Entries)
+            {
+                foreach (var line in SplitLines(entry))
+                {
+                    progress?.Report(new ToolProgress("", "monitor_line", line));
+                    emittedLineCount++;
+                }
+            }
+
+            return page.NextOffset;
+        }
+
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -141,21 +155,32 @@ public sealed class MonitorTool : ITool
                 return ToolResult.Error(error!);
             }
 
-            foreach (var entry in page.Entries)
-            {
-                foreach (var line in SplitLines(entry))
-                {
-                    progress?.Report(new ToolProgress("", "monitor_line", line));
-                    emittedLineCount++;
-                }
-            }
-
-            offset = page.NextOffset;
+            offset = Emit(page);
             if (!parsed.Follow)
                 return ToolResult.Success(BuildSnapshot(selection, currentRun!, page, emittedLineCount));
 
-            if (AgentBackgroundRunWaiter.IsTerminal(currentRun!.Status) && offset >= page.TotalCount)
-                return ToolResult.Success(BuildCompletion(selection, currentRun, emittedLineCount, startedAt));
+            if (AgentBackgroundRunWaiter.IsTerminal(currentRun!.Status))
+            {
+                // The run reached a terminal state, so no further output can be
+                // appended. Drain anything written between the page read above and
+                // the stop transition before reporting completion — the snapshot
+                // count is otherwise read before the terminal status, so a final
+                // line could be dropped under a concurrent producer.
+                if (!AgentStatusFormatter.TryGetOutputPage(
+                        _runtime,
+                        selection.Run.Id,
+                        offset,
+                        limit: null,
+                        out currentRun,
+                        out var finalPage,
+                        out error))
+                {
+                    return ToolResult.Error(error!);
+                }
+
+                Emit(finalPage);
+                return ToolResult.Success(BuildCompletion(selection, currentRun!, emittedLineCount, startedAt));
+            }
 
             if (DateTimeOffset.UtcNow - startedAt >= timeout)
             {
