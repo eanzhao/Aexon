@@ -122,7 +122,8 @@ public class FileEditTool : ITool
         var filePath = input.TryGetProperty("file_path", out var fp)
             ? fp.GetString() ?? ""
             : "";
-        return Task.FromResult(PermissionResult.Ask($"Allow editing: {filePath}"));
+        var resolvedPath = ResolvePath(filePath, context.WorkingDirectory);
+        return Task.FromResult(PermissionResult.Ask($"Allow editing: {resolvedPath}"));
     }
 
     public string? GetActivityDescription(JsonElement? input)
@@ -142,5 +143,15 @@ public class FileEditTool : ITool
             index += search.Length;
         }
         return count;
+    }
+
+    private static string ResolvePath(string path, string workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return path;
+
+        return Path.IsPathRooted(path)
+            ? path
+            : Path.GetFullPath(Path.Combine(workingDirectory, path));
     }
 }

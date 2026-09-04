@@ -118,6 +118,7 @@ public sealed class StreamingToolExecutor : IToolRuntime
                     continue;
                 }
 
+                RememberApproval(permissionRequest.ApprovedPlan, context);
                 concurrentPlans.Add(permissionRequest.ApprovedPlan);
                 continue;
             }
@@ -182,6 +183,7 @@ public sealed class StreamingToolExecutor : IToolRuntime
                         continue;
                     }
 
+                    RememberApproval(permissionRequest.ApprovedPlan, context);
                     plan = permissionRequest.ApprovedPlan;
                 }
             }
@@ -249,6 +251,14 @@ public sealed class StreamingToolExecutor : IToolRuntime
                 permission.Message ?? "Permission denied"),
             _ => ToolAuthorizationResult.Denied("Permission denied"),
         };
+    }
+
+    private void RememberApproval(
+        ToolExecutionPlan plan,
+        ToolExecutionContext context)
+    {
+        if (_permissions is IPermissionApprovalRecorder recorder)
+            recorder.RememberApproval(plan.Tool, plan.EffectiveInput, context);
     }
 
     private async Task<ToolRunOutcome> ExecuteAuthorizedAsync(

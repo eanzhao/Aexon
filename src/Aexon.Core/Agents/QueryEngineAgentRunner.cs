@@ -185,6 +185,11 @@ public sealed class QueryEngineAgentRunner : IAgentExecutionRunner
         foreach (var rule in source.Rules)
             clone.Rules.Add(rule);
 
+        foreach (var rule in source.ToolRules)
+            clone.ToolRules.Add(rule);
+
+        clone.PermissionMemory.CopyFrom(source.PermissionMemory);
+
         return clone;
     }
 }

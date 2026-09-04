@@ -91,17 +91,28 @@ public class FileWriteTool : ITool
         var filePath = input.TryGetProperty("file_path", out var fp)
             ? fp.GetString() ?? ""
             : "";
-        return Task.FromResult(PermissionResult.Ask($"Allow writing to: {filePath}"));
+        var resolvedPath = ResolvePath(filePath, context.WorkingDirectory);
+        return Task.FromResult(PermissionResult.Ask($"Allow writing to: {resolvedPath}"));
     }
 
     public bool IsDestructive(JsonElement input) =>
         input.TryGetProperty("file_path", out var fp) &&
-        File.Exists(fp.GetString() ?? "");
+        File.Exists(ResolvePath(fp.GetString() ?? "", Environment.CurrentDirectory));
 
     public string? GetActivityDescription(JsonElement? input)
     {
         if (input?.TryGetProperty("file_path", out var fp) == true)
             return $"Writing {Path.GetFileName(fp.GetString() ?? "")}";
         return "Writing file";
+    }
+
+    private static string ResolvePath(string path, string workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return path;
+
+        return Path.IsPathRooted(path)
+            ? path
+            : Path.GetFullPath(Path.Combine(workingDirectory, path));
     }
 }

@@ -56,6 +56,265 @@ public sealed record PermissionRule
 }
 
 /// <summary>
+/// Represents a scoped permission rule for a specific tool target.
+/// </summary>
+public sealed record ToolPermissionRule
+{
+    public required string ToolName { get; init; }
+    public required string Scope { get; init; }
+    public required string Pattern { get; init; }
+    public required PermissionBehavior Decision { get; init; }
+
+    public static ToolPermissionRule Create(
+        string toolName,
+        string scope,
+        string pattern,
+        PermissionBehavior decision)
+    {
+        if (string.IsNullOrWhiteSpace(toolName))
+            throw new ArgumentException("Tool name is required.", nameof(toolName));
+
+        if (string.IsNullOrWhiteSpace(scope))
+            throw new ArgumentException("Scope is required.", nameof(scope));
+
+        if (string.IsNullOrWhiteSpace(pattern))
+            throw new ArgumentException("Pattern is required.", nameof(pattern));
+
+        return new ToolPermissionRule
+        {
+            ToolName = toolName.Trim(),
+            Scope = scope.Trim(),
+            Pattern = pattern.Trim(),
+            Decision = decision,
+        };
+    }
+
+    public string ToExpression() => $"{ToolName}[{Scope}]({Pattern})";
+}
+
+/// <summary>
+/// Represents a normalized permission target extracted from a tool call.
+/// </summary>
+public sealed record PermissionScopeMatch(
+    string ToolName,
+    string Scope,
+    string Target);
+
+/// <summary>
+/// Resolves tool calls into canonical permission scopes and targets.
+/// </summary>
+public static class PermissionScopeResolver
+{
+    public static PermissionScopeMatch? Resolve(
+        ITool tool,
+        JsonElement input,
+        string workingDirectory)
+    {
+        if (TryGetString(input, "command", out var command))
+        {
+            return new PermissionScopeMatch(
+                tool.Name,
+                BuildScope(tool, "command"),
+                command);
+        }
+
+        if (TryGetString(input, "file_path", out var filePath))
+        {
+            return new PermissionScopeMatch(
+                tool.Name,
+                BuildScope(tool, "path"),
+                NormalizePath(filePath, workingDirectory));
+        }
+
+        if (TryGetString(input, "path", out var path))
+        {
+            return new PermissionScopeMatch(
+                tool.Name,
+                BuildScope(tool, "path"),
+                NormalizePath(path, workingDirectory));
+        }
+
+        return null;
+    }
+
+    public static string BuildScope(ITool tool, string targetKind) =>
+        $"{tool.Name.Trim().ToLowerInvariant()}:{targetKind.Trim().ToLowerInvariant()}";
+
+    public static bool IsPathScope(string scope) =>
+        scope.EndsWith(":path", StringComparison.OrdinalIgnoreCase);
+
+    public static string NormalizePath(string path, string workingDirectory)
+    {
+        var root = string.IsNullOrWhiteSpace(workingDirectory)
+            ? Environment.CurrentDirectory
+            : workingDirectory;
+        var resolved = Path.IsPathRooted(path)
+            ? path
+            : Path.GetFullPath(Path.Combine(root, path));
+
+        return NormalizePathValue(resolved);
+    }
+
+    public static string NormalizePathValue(string value) =>
+        value.Trim().Replace('\\', '/');
+
+    private static bool TryGetString(JsonElement input, string propertyName, out string value)
+    {
+        value = string.Empty;
+
+        if (!input.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var raw = property.GetString();
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        value = raw.Trim();
+        return true;
+    }
+}
+
+/// <summary>
+/// Matches scoped tool permission rules.
+/// </summary>
+public static class ToolPermissionRuleMatcher
+{
+    public static ToolPermissionRule? FindFirstMatch(
+        IEnumerable<ToolPermissionRule> rules,
+        ITool tool,
+        string scope,
+        string target,
+        PermissionBehavior? decision = null)
+    {
+        foreach (var rule in rules)
+        {
+            if (decision.HasValue && rule.Decision != decision.Value)
+                continue;
+
+            if (Matches(rule, tool, scope, target))
+                return rule;
+        }
+
+        return null;
+    }
+
+    public static bool Matches(
+        ToolPermissionRule rule,
+        ITool tool,
+        string scope,
+        string target)
+    {
+        if (!MatchesTool(rule.ToolName, tool))
+            return false;
+
+        if (!string.Equals(rule.Scope, scope, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var candidate = PermissionScopeResolver.IsPathScope(scope)
+            ? PermissionScopeResolver.NormalizePathValue(target)
+            : target.Trim();
+
+        return MatchesPattern(rule.Pattern, candidate, PermissionScopeResolver.IsPathScope(scope));
+    }
+
+    public static bool MatchesPattern(
+        string pattern,
+        string target,
+        bool pathScope = false)
+    {
+        if (string.IsNullOrWhiteSpace(pattern))
+            return false;
+
+        var candidate = pathScope
+            ? PermissionScopeResolver.NormalizePathValue(target)
+            : target.Trim();
+
+        if (TryGetRegexPattern(pattern.Trim(), out var regexPattern))
+        {
+            return Regex.IsMatch(
+                candidate,
+                regexPattern,
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        }
+
+        var globPattern = pathScope
+            ? PermissionScopeResolver.NormalizePathValue(pattern)
+            : pattern.Trim();
+
+        return MatchGlobPattern(globPattern, candidate);
+    }
+
+    public static bool MatchGlobPattern(
+        string pattern,
+        string target,
+        bool caseInsensitive = true)
+    {
+        var regexPattern = ConvertGlobToRegex(pattern);
+        var options = RegexOptions.Singleline;
+        if (caseInsensitive)
+            options |= RegexOptions.IgnoreCase;
+
+        return Regex.IsMatch(target, $"^{regexPattern}$", options);
+    }
+
+    private static bool MatchesTool(string toolName, ITool tool)
+    {
+        if (string.Equals(toolName, tool.Name, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return tool.Aliases.Any(alias =>
+            string.Equals(toolName, alias, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool TryGetRegexPattern(string pattern, out string regexPattern)
+    {
+        if (pattern.StartsWith("regex:", StringComparison.OrdinalIgnoreCase))
+        {
+            regexPattern = pattern["regex:".Length..].Trim();
+            return !string.IsNullOrWhiteSpace(regexPattern);
+        }
+
+        if (pattern.Length >= 2 &&
+            pattern[0] == '/' &&
+            pattern[^1] == '/')
+        {
+            regexPattern = pattern[1..^1];
+            return !string.IsNullOrWhiteSpace(regexPattern);
+        }
+
+        regexPattern = string.Empty;
+        return false;
+    }
+
+    private static string ConvertGlobToRegex(string pattern)
+    {
+        var builder = new StringBuilder();
+
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            var current = pattern[i];
+            switch (current)
+            {
+                case '*':
+                    builder.Append(".*");
+                    break;
+                case '?':
+                    builder.Append('.');
+                    break;
+                default:
+                    builder.Append(Regex.Escape(current.ToString()));
+                    break;
+            }
+        }
+
+        return builder.ToString();
+    }
+}
+
+/// <summary>
 /// Defines permission rule match kind values.
 /// </summary>
 internal enum PermissionRuleMatchKind

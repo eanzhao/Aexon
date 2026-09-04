@@ -189,9 +189,22 @@ public class BashTool : ITool
             : "";
 
         var classification = BashCommandClassifier.Classify(command);
+        var risk = DangerousCommandDetector.Classify(command);
 
-        if (classification.Category == BashCommandCategory.ReadOnly)
+        if (classification.Category == BashCommandCategory.ReadOnly &&
+            risk.RiskLevel == DangerousCommandRiskLevel.Safe)
+        {
             return Task.FromResult(PermissionResult.Allow());
+        }
+
+        if (risk.RiskLevel == DangerousCommandRiskLevel.Dangerous)
+        {
+            var reason = string.IsNullOrWhiteSpace(risk.Reason)
+                ? "Dangerous command detected"
+                : risk.Reason;
+            return Task.FromResult(
+                PermissionResult.Ask($"Dangerous command requires explicit approval: {command} ({reason})"));
+        }
 
         var message = classification.Category switch
         {
@@ -199,6 +212,14 @@ public class BashTool : ITool
             BashCommandCategory.Write => $"Allow command that may modify files or git state: {command}",
             _ => $"Allow running: {command}",
         };
+
+        if (risk.RiskLevel == DangerousCommandRiskLevel.Caution)
+        {
+            var reason = string.IsNullOrWhiteSpace(risk.Reason)
+                ? "Caution"
+                : risk.Reason;
+            message = $"{message} [{reason}]";
+        }
 
         return Task.FromResult(PermissionResult.Ask(message));
     }
