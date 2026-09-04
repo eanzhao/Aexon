@@ -30,6 +30,7 @@ public class CommandContext
     public required Action<string> WriteLine { get; init; }
     public required Tools.ToolRegistry Tools { get; init; }
     public required Query.QueryEngine QueryEngine { get; init; }
+    public Func<string, Task>? SubmitPromptAsync { get; init; }
     public Query.AiProvider AiProvider { get; init; } = Query.AiProvider.Anthropic;
     public required Permissions.PermissionContext PermissionContext { get; init; }
     public required IAgentTaskRuntime AgentTaskRuntime { get; init; }

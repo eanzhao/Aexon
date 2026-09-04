@@ -14,6 +14,7 @@ using Aexon.Core.Memory;
 using Aexon.Core.Permissions;
 using Aexon.Core.Providers;
 using Aexon.Core.Query;
+using Aexon.Core.Skills;
 using Aexon.Core.Storage;
 using Aexon.Core.Todos;
 using Aexon.Core.Tools;
@@ -96,9 +97,11 @@ internal static class Program
 
         Environment.CurrentDirectory = workingDirectory;
 
+        var skillLoader = new SkillLoader();
         var contextProvider = new ContextProvider
         {
             WorkingDirectory = workingDirectory,
+            SkillLoader = skillLoader,
         };
         if (resumed?.Metadata.Mode is PermissionMode resumedMode)
             contextProvider.PermissionContext.Mode = resumedMode;
@@ -219,6 +222,8 @@ internal static class Program
             new UdsChannelTransport(channelConnectionManager, agentMessageRuntime));
         var messageActivationRuntime = new InMemoryAgentMessageActivationRuntime();
         var toolRegistry = BuildToolRegistry(
+            skillLoader,
+            workingDirectory,
             providerRouter,
             managedPolicy.AllowWebSearch,
             () => config.Model,
@@ -234,7 +239,7 @@ internal static class Program
             messageActivationRuntime,
             agentRuntimeOptions,
             agentSettings.Settings.BackgroundRunConcurrency);
-        var commandRegistry = BuildCommandRegistry();
+        var commandRegistry = BuildCommandRegistry(skillLoader.Load(workingDirectory));
         await using var mcpRuntime = managedPolicy.AllowExternalMcpServers
             ? await McpRuntime.CreateAsync(
                 toolRegistry,
@@ -373,6 +378,8 @@ internal static class Program
     }
 
     private static ToolRegistry BuildToolRegistry(
+        SkillLoader skillLoader,
+        string workingDirectory,
         IProviderCapabilityRouter providerRouter,
         bool allowWebSearch,
         Func<string?> currentModelAccessor,
@@ -393,6 +400,7 @@ internal static class Program
         var backgroundRunScheduler = new BackgroundAgentRunScheduler(
             maxConcurrency: backgroundRunConcurrency);
         registry.Register(new ToolSearchTool(registry));
+        registry.Register(new SkillTool(skillLoader, workingDirectory));
         registry.Register(new BashTool());
         registry.Register(new FileReadTool());
         registry.Register(new FileWriteTool());
@@ -411,7 +419,8 @@ internal static class Program
             hooks,
             backgroundRunScheduler,
             messageActivationRuntime,
-            runtimeOptions: agentRuntimeOptions));
+            runtimeOptions: agentRuntimeOptions,
+            skillLoader: skillLoader));
         registry.RegisterDeferred(new DeferredToolRegistration(
             "CronCreate",
             () => new CronCreateTool(cronRuntime),
@@ -558,7 +567,8 @@ internal static class Program
         }
     }
 
-    private static CommandRegistry BuildCommandRegistry()
+    private static CommandRegistry BuildCommandRegistry(
+        IReadOnlyDictionary<string, Skill> skills)
     {
         var registry = new CommandRegistry();
         registry.Register(new HelpCommand());
@@ -581,6 +591,15 @@ internal static class Program
         registry.Register(new TitleCommand());
         registry.Register(new TagCommand());
         registry.Register(new AwayCommand());
+
+        foreach (var skill in skills.Values.OrderBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            if (registry.Get(skill.Name) != null)
+                continue;
+
+            registry.Register(new SkillCommand(skill));
+        }
+
         return registry;
     }
 
@@ -677,6 +696,7 @@ Environment:
                 WriteLine = Console.WriteLine,
                 Tools = _toolRegistry,
                 QueryEngine = _queryEngine,
+                SubmitPromptAsync = RunQueryAsync,
                 AiProvider = _aiProvider,
                 PermissionContext = _permissionContext,
                 AgentTaskRuntime = _agentTaskRuntime,

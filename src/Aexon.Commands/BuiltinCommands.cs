@@ -3,6 +3,7 @@ using Aexon.Core.Commands;
 using Aexon.Core.Compaction;
 using Aexon.Core.Permissions;
 using Aexon.Core.Query;
+using Aexon.Core.Skills;
 
 namespace Aexon.Commands;
 
@@ -42,6 +43,55 @@ public class ClearCommand : ICommand
         await context.QueryEngine.ClearMessagesAsync();
         context.RequestClear?.Invoke();
         context.WriteLine("  Conversation cleared.");
+    }
+}
+
+/// <summary>
+/// Represents a dynamically loaded skill slash command.
+/// </summary>
+public sealed class SkillCommand : ICommand
+{
+    private readonly Skill _skill;
+
+    public SkillCommand(Skill skill)
+    {
+        _skill = skill;
+    }
+
+    public string Name => _skill.Name;
+
+    public string Description => _skill.Description;
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        if (context.SubmitPromptAsync == null)
+        {
+            context.WriteLine("  Skill commands are unavailable in this context.");
+            return;
+        }
+
+        await context.SubmitPromptAsync(BuildPrompt(args));
+    }
+
+    private string BuildPrompt(string args)
+    {
+        var trimmedArgs = args.Trim();
+        if (string.IsNullOrWhiteSpace(trimmedArgs))
+        {
+            return $"""
+                The user invoked /{_skill.Name}.
+                First call SkillTool with name="{_skill.Name}".
+                After the tool returns, follow that skill for the current task and continue normally.
+                """;
+        }
+
+        return $"""
+            The user invoked /{_skill.Name} with this request:
+            {trimmedArgs}
+
+            First call SkillTool with name="{_skill.Name}".
+            After the tool returns, use that skill to handle the request above.
+            """;
     }
 }
 

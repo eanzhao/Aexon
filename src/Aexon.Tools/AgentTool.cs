@@ -6,6 +6,7 @@ using Aexon.Core.Hooks;
 using Aexon.Core.Permissions;
 using Aexon.Core.Providers;
 using Aexon.Core.Query;
+using Aexon.Core.Skills;
 using Aexon.Core.Tools;
 
 namespace Aexon.Tools;
@@ -58,6 +59,7 @@ public sealed class AgentTool : ITool
     private readonly BackgroundAgentRunScheduler _backgroundRunScheduler;
     private readonly AgentAutoResumeMode _autoResumeMode;
     private readonly AgentRuntimeOptions? _runtimeOptions;
+    private readonly SkillLoader _skillLoader;
     private string? _assignmentErrorMessage;
 
     public AgentTool(
@@ -70,7 +72,8 @@ public sealed class AgentTool : ITool
         BackgroundAgentRunScheduler? backgroundRunScheduler = null,
         IAgentMessageActivationRuntime? messageActivationRuntime = null,
         AgentAutoResumeMode autoResumeMode = AgentAutoResumeMode.Queue,
-        AgentRuntimeOptions? runtimeOptions = null)
+        AgentRuntimeOptions? runtimeOptions = null,
+        SkillLoader? skillLoader = null)
     {
         _runner = runner;
         _providerCapabilityRouter = providerCapabilityRouter ?? new DefaultProviderCapabilityRouter();
@@ -82,6 +85,7 @@ public sealed class AgentTool : ITool
         _backgroundRunScheduler = backgroundRunScheduler ?? new BackgroundAgentRunScheduler();
         _autoResumeMode = autoResumeMode;
         _runtimeOptions = runtimeOptions;
+        _skillLoader = skillLoader ?? new SkillLoader();
     }
 
     public string Name => "Agent";
@@ -289,6 +293,7 @@ public sealed class AgentTool : ITool
                 Tools = BuildReadOnlyToolRegistry(
                     context.MainLoopModel,
                     context.MainLoopProvider,
+                    context.WorkingDirectory,
                     workItemId),
                 PermissionContext = ClonePermissionContext(context.PermissionContext),
                 UseIsolatedWorkspace = input.UseIsolatedWorkspace,
@@ -456,12 +461,14 @@ public sealed class AgentTool : ITool
     private ToolRegistry BuildReadOnlyToolRegistry(
         string model,
         AiProvider provider,
+        string workingDirectory,
         string workItemId)
     {
         var registry = new ToolRegistry();
         registry.Register(new FileReadTool());
         registry.Register(new GlobTool());
         registry.Register(new GrepTool());
+        registry.Register(new SkillTool(_skillLoader, workingDirectory));
         if (_teamRuntime != null)
             registry.Register(new TeamStatusTool(_teamRuntime));
         if (_messageRuntime != null)

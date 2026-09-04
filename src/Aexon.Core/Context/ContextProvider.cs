@@ -1,6 +1,7 @@
 using Aexon.Core.Markdown;
 using Aexon.Core.Permissions;
 using Aexon.Core.Query;
+using Aexon.Core.Skills;
 using Aexon.Core.Tools;
 
 namespace Aexon.Core.Context;
@@ -18,6 +19,7 @@ public class ContextProvider
     public string? SessionMemoryContent { get; set; }
     public string? UserClaudeDirectory { get; set; }
     public string? SystemClaudeDirectory { get; set; }
+    public SkillLoader SkillLoader { get; set; } = new();
     public IReadOnlyList<MemoryInstructionDiagnostic> MemoryDiagnostics { get; private set; } = [];
 
     public PermissionContext GetPermissionContext()
@@ -49,6 +51,10 @@ public class ContextProvider
         var toolsSection = await BuildToolsSectionAsync(tools);
         if (!string.IsNullOrWhiteSpace(toolsSection))
             parts.Add(toolsSection);
+
+        var skillsSection = BuildSkillsSection();
+        if (!string.IsNullOrWhiteSpace(skillsSection))
+            parts.Add(skillsSection);
 
         var contextSection = await BuildContextSectionAsync(profile);
         if (!string.IsNullOrWhiteSpace(contextSection))
@@ -98,6 +104,20 @@ public class ContextProvider
         return sections.Count == 0
             ? null
             : "# Tools\n" + string.Join("\n\n", sections);
+    }
+
+    private string? BuildSkillsSection()
+    {
+        var skills = SkillLoader.Load(WorkingDirectory);
+        if (skills.Count == 0)
+            return null;
+
+        var lines = skills.Values
+            .OrderBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .Select(skill => $"Available skills: {skill.Name} — {skill.Description}");
+
+        return "# Skills\n" + string.Join("\n", lines);
     }
 
     private async Task<string?> BuildContextSectionAsync(QueryExecutionProfile profile)
