@@ -397,6 +397,7 @@ internal static class Program
         registry.Register(new FileReadTool());
         registry.Register(new FileWriteTool());
         registry.Register(new FileEditTool());
+        registry.Register(new NotebookEditTool());
         registry.Register(new GlobTool());
         registry.Register(new GrepTool());
         registry.Register(new AskUserQuestionTool());

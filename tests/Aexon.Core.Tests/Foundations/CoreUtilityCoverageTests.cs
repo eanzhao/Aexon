@@ -142,6 +142,7 @@ public sealed class CoreUtilityCoverageTests
             new FileReadTool(),
             new FileWriteTool(),
             new FileEditTool(),
+            new NotebookEditTool(),
             new GlobTool(),
             new GrepTool(),
             new AskUserQuestionTool(),
