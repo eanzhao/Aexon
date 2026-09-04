@@ -1,3 +1,4 @@
+using System.Reflection;
 using Aexon.Commands;
 using Aexon.Core.Agents;
 using Aexon.Core.Commands;
@@ -48,6 +49,62 @@ public sealed class BuiltinCommandsTests
         Assert.Contains("/exit", output, StringComparison.Ordinal);
         Assert.Contains("/quit", output, StringComparison.Ordinal);
         Assert.True(exitRequested);
+    }
+
+    [Fact]
+    public void GitWorkflowCommands_AreRegisteredInCliCommandRegistry()
+    {
+        var registry = BuildCliCommandRegistry();
+
+        Assert.IsType<DiffCommand>(registry.Get("diff"));
+        Assert.IsType<ReviewCommand>(registry.Get("review"));
+        Assert.IsType<CommitCommand>(registry.Get("commit"));
+        Assert.IsType<BranchCommand>(registry.Get("branch"));
+        Assert.IsType<PrCommand>(registry.Get("pr"));
+    }
+
+    [Fact]
+    public async Task GitWorkflowPromptCommands_InjectExpectedPrompts()
+    {
+        var diffPrompt = await ExecutePromptCommandAsync(new DiffCommand());
+        Assert.Contains("git diff --cached", diffPrompt, StringComparison.Ordinal);
+        Assert.Contains("group the summary by file or logical area", diffPrompt, StringComparison.OrdinalIgnoreCase);
+
+        var reviewPrompt = await ExecutePromptCommandAsync(new ReviewCommand());
+        Assert.Contains("origin/dev", reviewPrompt, StringComparison.Ordinal);
+        Assert.Contains("then dev, then main", reviewPrompt, StringComparison.Ordinal);
+        Assert.Contains("SQL safety", reviewPrompt, StringComparison.Ordinal);
+        Assert.Contains("file:line", reviewPrompt, StringComparison.Ordinal);
+
+        var commitPrompt = await ExecutePromptCommandAsync(new CommitCommand());
+        Assert.Contains("git status", commitPrompt, StringComparison.Ordinal);
+        Assert.Contains("git diff", commitPrompt, StringComparison.Ordinal);
+        Assert.Contains("git log --oneline -20", commitPrompt, StringComparison.Ordinal);
+        Assert.Contains("--no-verify", commitPrompt, StringComparison.Ordinal);
+        Assert.Contains("--amend", commitPrompt, StringComparison.Ordinal);
+
+        var prPrompt = await ExecutePromptCommandAsync(new PrCommand());
+        Assert.Contains("gh pr create", prPrompt, StringComparison.Ordinal);
+        Assert.Contains("## Summary", prPrompt, StringComparison.Ordinal);
+        Assert.Contains("## Test plan", prPrompt, StringComparison.Ordinal);
+        Assert.Contains("origin/dev", prPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BranchCommand_RejectsUnsafeBranchNames()
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+
+        await new BranchCommand().ExecuteAsync(
+            "feature;rm",
+            CreateContext(bundle.Engine, bundle.PermissionContext, lines));
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Usage: /branch [name]", output, StringComparison.Ordinal);
+        Assert.Contains("may only contain letters, numbers", output, StringComparison.Ordinal);
+        Assert.Empty(bundle.Engine.Messages);
     }
 
     [Fact]
@@ -383,11 +440,12 @@ public sealed class BuiltinCommandsTests
         List<string> lines,
         IReadOnlyList<ICommand>? commands = null,
         AgentRuntimeOptions? runtimeOptions = null,
-        AiProvider aiProvider = AiProvider.Anthropic) =>
+        AiProvider aiProvider = AiProvider.Anthropic,
+        ToolRegistry? tools = null) =>
         new()
         {
             WriteLine = lines.Add,
-            Tools = new ToolRegistry(),
+            Tools = tools ?? new ToolRegistry(),
             QueryEngine = engine,
             AiProvider = aiProvider,
             PermissionContext = permissionContext,
@@ -427,6 +485,30 @@ public sealed class BuiltinCommandsTests
             initialUsage: initialUsage);
 
         return new EngineBundle(engine, journal, permissionContext);
+    }
+
+    private static async Task<string> ExecutePromptCommandAsync(ICommand command, string args = "")
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+
+        await command.ExecuteAsync(args, CreateContext(bundle.Engine, bundle.PermissionContext, lines));
+
+        var promptMessage = Assert.Single(bundle.Engine.Messages.OfType<UserMessage>());
+        return Assert.IsType<TextBlock>(Assert.Single(promptMessage.Content)).Text;
+    }
+
+    private static CommandRegistry BuildCliCommandRegistry()
+    {
+        var cliAssembly = AppDomain.CurrentDomain.GetAssemblies()
+                              .FirstOrDefault(assembly => assembly.GetName().Name == "Aexon.Cli")
+                          ?? Assembly.Load("Aexon.Cli");
+        var programType = cliAssembly.GetType("Aexon.Cli.Program", throwOnError: true)!;
+        var buildMethod = programType.GetMethod("BuildCommandRegistry", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(buildMethod);
+
+        return Assert.IsType<CommandRegistry>(buildMethod!.Invoke(null, null));
     }
 
     private sealed record EngineBundle(
