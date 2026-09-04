@@ -41,12 +41,17 @@ public class CommandContext
     public IAgentMessageActivationRuntime? AgentMessageActivationRuntime { get; init; }
     public required IReadOnlyList<ICommand> Commands { get; init; }
     public Func<TimeSpan, CancellationToken, Task>? DelayAsync { get; init; }
+    public Func<string?>? ReadInputLine { get; init; }
+    public DateTimeOffset? SessionStartedAt { get; init; }
+    public Func<int>? SessionTurnCountProvider { get; init; }
     public CancellationToken CancellationToken { get; init; }
     public Action? RequestExit { get; init; }
     public Action? RequestClear { get; init; }
 
     public AgentAutoResumeMode CurrentAgentAutoResumeMode =>
         AgentRuntimeOptions?.AutoResumeMode ?? AgentAutoResumeMode;
+
+    public int CurrentSessionTurnCount => SessionTurnCountProvider?.Invoke() ?? 0;
 }
 
 /// <summary>

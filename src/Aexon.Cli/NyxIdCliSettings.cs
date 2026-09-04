@@ -5,7 +5,8 @@ namespace Aexon.Cli;
 internal sealed record NyxIdCliSettings(
     string DefaultBaseUrl,
     string ActiveBaseUrl,
-    bool HasStoredCredentials)
+    bool HasStoredCredentials,
+    bool BaseUrlFromEnvironment)
 {
     public const string HostedBaseUrl = "https://nyx-api.chrono-ai.fun";
 }
@@ -25,7 +26,8 @@ internal static class NyxIdCliSettingsLoader
         return new NyxIdCliSettings(
             configuredBaseUrl,
             stored?.BaseUrl ?? configuredBaseUrl,
-            stored != null);
+            stored != null,
+            !string.IsNullOrWhiteSpace(getEnvironmentVariable("NYXID_BASE_URL")));
     }
 
     private static string? Normalize(string? value)

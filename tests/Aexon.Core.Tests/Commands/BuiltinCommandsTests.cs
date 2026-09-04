@@ -2,7 +2,9 @@ using System.Reflection;
 using Aexon.Commands;
 using Aexon.Core.Agents;
 using Aexon.Core.Commands;
+using Aexon.Core.Configuration;
 using Aexon.Core.Context;
+using Aexon.Core.Memory;
 using Aexon.Core.Messages;
 using Aexon.Core.Permissions;
 using Aexon.Core.Query;
@@ -61,6 +63,23 @@ public sealed class BuiltinCommandsTests
         Assert.IsType<CommitCommand>(registry.Get("commit"));
         Assert.IsType<BranchCommand>(registry.Get("branch"));
         Assert.IsType<PrCommand>(registry.Get("pr"));
+    }
+
+    [Fact]
+    public void NewBuiltinCommands_AreRegisteredInCliCommandRegistry()
+    {
+        var registry = BuildCliCommandRegistry();
+
+        Assert.IsType<ConfigCommand>(registry.Get("config"));
+        Assert.IsType<PermissionsCommand>(registry.Get("permissions"));
+        Assert.IsType<MemoryCommand>(registry.Get("memory"));
+        Assert.IsType<InitCommand>(registry.Get("init"));
+        Assert.IsType<DoctorCommand>(registry.Get("doctor"));
+        Assert.IsType<VersionCommand>(registry.Get("version"));
+        Assert.IsType<StatusCommand>(registry.Get("status"));
+        Assert.IsType<ResumeCommand>(registry.Get("resume"));
+        Assert.IsType<RenameCommand>(registry.Get("rename"));
+        Assert.IsType<StatsCommand>(registry.Get("stats"));
     }
 
     [Fact]
@@ -434,6 +453,292 @@ public sealed class BuiltinCommandsTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task ConfigCommand_ListsAndGetsRuntimeValues()
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        var command = new ConfigCommand(
+            new AnthropicClientSettings(
+                ApiKey: "secret",
+                BaseUrl: "https://api.anthropic.com",
+                Model: "claude-sonnet-4-6",
+                MaxTokens: 16000,
+                ApiKeyFromEnvironment: false,
+                ApiKeyFromAppSettings: true,
+                SourcePath: Path.Combine(temp.Root, "appsettings.secrets.json"),
+                Diagnostics: []),
+            new ManagedSettingsLoadResult(
+                new ManagedSettingsSnapshot
+                {
+                    SourcePath = Path.Combine(temp.Root, ".claude", "settings.json"),
+                },
+                [],
+                [Path.Combine(temp.Root, ".claude", "settings.json")]),
+            new NyxIdRuntimeConfig(
+                "https://nyx.default.test",
+                "https://nyx.active.test",
+                HasStoredCredentials: true,
+                BaseUrlFromEnvironment: true));
+
+        var context = CreateContext(bundle.Engine, bundle.PermissionContext, lines);
+        await command.ExecuteAsync("", context);
+        await command.ExecuteAsync("get provider", context);
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Runtime config:", output, StringComparison.Ordinal);
+        Assert.Contains("model: claude-sonnet-4-6", output, StringComparison.Ordinal);
+        Assert.Contains("provider: Anthropic", output, StringComparison.Ordinal);
+        Assert.Contains("permissionMode: Default", output, StringComparison.Ordinal);
+        Assert.Contains("anthropic.apiKeySource:", output, StringComparison.Ordinal);
+        Assert.Contains("nyxid.activeBaseUrl: https://nyx.active.test", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PermissionsCommand_ShowsAndClearsRules()
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        bundle.PermissionContext.Mode = PermissionMode.Plan;
+        bundle.PermissionContext.AddRule(PermissionBehavior.Allow, "Read", "README.md");
+
+        var context = CreateContext(
+            bundle.Engine,
+            bundle.PermissionContext,
+            lines,
+            readInputLine: static () => "yes");
+
+        await new PermissionsCommand().ExecuteAsync("", context);
+        await new PermissionsCommand().ExecuteAsync("clear", context);
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Mode: Plan", output, StringComparison.Ordinal);
+        Assert.Contains("ToolName=Read", output, StringComparison.Ordinal);
+        Assert.Contains("Behavior=Allow", output, StringComparison.Ordinal);
+        Assert.Contains("Cleared 1 permission rule(s).", output, StringComparison.Ordinal);
+        Assert.Empty(bundle.PermissionContext.Rules);
+    }
+
+    [Fact]
+    public async Task MemoryCommand_ListsShowsAndSearchesKnownFiles()
+    {
+        using var temp = new TempDirectory();
+        var workingDirectory = temp.FullPath("project");
+        Directory.CreateDirectory(workingDirectory);
+        Directory.CreateDirectory(Path.Combine(workingDirectory, ".git"));
+        await File.WriteAllTextAsync(Path.Combine(workingDirectory, "CLAUDE.md"), "project alpha\nproject beta");
+
+        var userClaudeDirectory = temp.FullPath("user", ".claude");
+        Directory.CreateDirectory(userClaudeDirectory);
+        await File.WriteAllTextAsync(Path.Combine(userClaudeDirectory, "CLAUDE.md"), "user alpha");
+
+        var layout = new MemdirLayout
+        {
+            MemoryBaseDirectory = temp.FullPath("memdir"),
+            ProjectRootDirectory = workingDirectory,
+        };
+        layout.EnsureDirectories();
+        await File.WriteAllTextAsync(layout.MemoryIndexPath, "project memory alpha");
+
+        using var bundle = CreateEngineBundle(workingDirectory);
+        var lines = new List<string>();
+        var command = new MemoryCommand(layout, userClaudeDirectory);
+        var context = CreateContext(bundle.Engine, bundle.PermissionContext, lines);
+
+        await command.ExecuteAsync("list", context);
+        await command.ExecuteAsync("show user", context);
+        await command.ExecuteAsync("search alpha", context);
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Memory files:", output, StringComparison.Ordinal);
+        Assert.Contains("user:", output, StringComparison.Ordinal);
+        Assert.Contains("project:", output, StringComparison.Ordinal);
+        Assert.Contains("memdir-project:", output, StringComparison.Ordinal);
+        Assert.Contains("user alpha", output, StringComparison.Ordinal);
+        Assert.Contains(":1: user alpha", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitCommand_CreatesScaffoldFile()
+    {
+        using var temp = new TempDirectory("aexon-init-" + Guid.NewGuid().ToString("N"));
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        var context = CreateContext(bundle.Engine, bundle.PermissionContext, lines);
+
+        await new InitCommand().ExecuteAsync("", context);
+
+        var path = Path.Combine(temp.Root, "CLAUDE.md");
+        Assert.True(File.Exists(path));
+        Assert.Contains("## Tech Stack", await File.ReadAllTextAsync(path), StringComparison.Ordinal);
+        Assert.Contains("Wrote CLAUDE.md scaffold", string.Join(Environment.NewLine, lines), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DoctorCommand_ReportsCheckStatusesAndSummary()
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        var command = new FakeDoctorCommand(
+            new AnthropicClientSettings(
+                ApiKey: "token",
+                BaseUrl: null,
+                Model: null,
+                MaxTokens: null,
+                ApiKeyFromEnvironment: true,
+                ApiKeyFromAppSettings: false,
+                SourcePath: null,
+                Diagnostics: []),
+            new NyxIdRuntimeConfig(
+                "https://nyx.default.test",
+                "https://nyx.active.test",
+                HasStoredCredentials: false,
+                BaseUrlFromEnvironment: false));
+
+        await command.ExecuteAsync("", CreateContext(bundle.Engine, bundle.PermissionContext, lines));
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("[OK] dotnet SDK:", output, StringComparison.Ordinal);
+        Assert.Contains("[OK] git binary:", output, StringComparison.Ordinal);
+        Assert.Contains("[OK] working directory is a git repo:", output, StringComparison.Ordinal);
+        Assert.Contains("[OK] Anthropic connectivity: HTTP 200", output, StringComparison.Ordinal);
+        Assert.Contains("[OK] NyxID connectivity: HTTP 204", output, StringComparison.Ordinal);
+        Assert.Contains("Summary: 5 passed, 0 failed.", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VersionCommand_PrintsProductAndRuntimeVersions()
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+
+        await new VersionCommand(typeof(BuiltinCommandsTests).Assembly).ExecuteAsync(
+            "",
+            CreateContext(bundle.Engine, bundle.PermissionContext, lines));
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Product version:", output, StringComparison.Ordinal);
+        Assert.Contains(".NET runtime:", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StatusCommand_PrintsSessionSnapshot()
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        var runtime = new InMemoryAgentTaskRuntime();
+        runtime.CreateWorkItem("Inspect runtime", subagentId: "subagent-1");
+
+        await new StatusCommand().ExecuteAsync(
+            "",
+            CreateContext(
+                bundle.Engine,
+                bundle.PermissionContext,
+                lines,
+                agentTaskRuntime: runtime,
+                sessionStartedAt: DateTimeOffset.UtcNow - TimeSpan.FromMinutes(90),
+                sessionTurnCountProvider: static () => 7));
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Session ID: session-1", output, StringComparison.Ordinal);
+        Assert.Contains("Model: claude-sonnet-4-6", output, StringComparison.Ordinal);
+        Assert.Contains("Total turns: 7", output, StringComparison.Ordinal);
+        Assert.Contains("Active subagents: 1", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResumeCommand_ListsRecentSessionsAndPrintsStubGuidance()
+    {
+        using var temp = new TempDirectory();
+        var store = new JsonlTranscriptStore(temp.Root);
+        var session = await store.CreateSessionAsync(temp.FullPath("work"), "claude-sonnet-4-6");
+        session.Metadata.Title = "Alpha";
+        await store.UpdateSessionAsync(session);
+
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        var context = CreateContext(
+            bundle.Engine,
+            bundle.PermissionContext,
+            lines,
+            readInputLine: static () => "1");
+
+        await new ResumeCommand(store).ExecuteAsync("", context);
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Recent sessions:", output, StringComparison.Ordinal);
+        Assert.Contains("Selected session:", output, StringComparison.Ordinal);
+        Assert.Contains($"aexon --resume {session.SessionId}", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RenameCommand_ShowsAndRenamesTitle()
+    {
+        using var temp = new TempDirectory();
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        var context = CreateContext(bundle.Engine, bundle.PermissionContext, lines);
+
+        await new RenameCommand().ExecuteAsync("", context);
+        await new RenameCommand().ExecuteAsync("Session Alpha", context);
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Current title: (none)", output, StringComparison.Ordinal);
+        Assert.Contains("Session title renamed to: Session Alpha", output, StringComparison.Ordinal);
+        Assert.Equal("Session Alpha", bundle.Engine.SessionMetadata.Title);
+    }
+
+    [Fact]
+    public async Task StatsCommand_AggregatesRecentUsage()
+    {
+        using var temp = new TempDirectory();
+        var store = new JsonlTranscriptStore(temp.Root);
+
+        var session1 = await store.CreateSessionAsync(temp.FullPath("work-1"), "claude-sonnet-4-6");
+        var user1 = UserMessage.FromText("hello");
+        var assistant1 = new AssistantMessage
+        {
+            Content = [new TextBlock("world")],
+            Usage = new TokenUsage
+            {
+                InputTokens = 1_000,
+                OutputTokens = 500,
+            },
+        };
+        await store.AppendMessageAsync(session1, user1, null);
+        await store.AppendMessageAsync(session1, assistant1, user1.Id);
+
+        var session2 = await store.CreateSessionAsync(temp.FullPath("work-2"), "claude-sonnet-4-6");
+        var user2 = UserMessage.FromText("again");
+        var assistant2 = new AssistantMessage
+        {
+            Content = [new TextBlock("done")],
+            Usage = new TokenUsage
+            {
+                InputTokens = 2_000,
+                OutputTokens = 1_000,
+            },
+        };
+        await store.AppendMessageAsync(session2, user2, null);
+        await store.AppendMessageAsync(session2, assistant2, user2.Id);
+
+        using var bundle = CreateEngineBundle(temp.Root);
+        var lines = new List<string>();
+        await new StatsCommand(store).ExecuteAsync(
+            "--since 365d",
+            CreateContext(bundle.Engine, bundle.PermissionContext, lines));
+
+        var output = string.Join(Environment.NewLine, lines);
+        Assert.Contains("Total sessions: 2", output, StringComparison.Ordinal);
+        Assert.Contains("Total tokens: 4,500", output, StringComparison.Ordinal);
+        Assert.Contains("Estimated cost: $0.0315", output, StringComparison.Ordinal);
+    }
+
     private static CommandContext CreateContext(
         QueryEngine engine,
         PermissionContext permissionContext,
@@ -441,7 +746,11 @@ public sealed class BuiltinCommandsTests
         IReadOnlyList<ICommand>? commands = null,
         AgentRuntimeOptions? runtimeOptions = null,
         AiProvider aiProvider = AiProvider.Anthropic,
-        ToolRegistry? tools = null) =>
+        ToolRegistry? tools = null,
+        IAgentTaskRuntime? agentTaskRuntime = null,
+        Func<string?>? readInputLine = null,
+        DateTimeOffset? sessionStartedAt = null,
+        Func<int>? sessionTurnCountProvider = null) =>
         new()
         {
             WriteLine = lines.Add,
@@ -449,9 +758,12 @@ public sealed class BuiltinCommandsTests
             QueryEngine = engine,
             AiProvider = aiProvider,
             PermissionContext = permissionContext,
-            AgentTaskRuntime = new InMemoryAgentTaskRuntime(),
+            AgentTaskRuntime = agentTaskRuntime ?? new InMemoryAgentTaskRuntime(),
             AgentRuntimeOptions = runtimeOptions,
             Commands = commands ?? [],
+            ReadInputLine = readInputLine,
+            SessionStartedAt = sessionStartedAt,
+            SessionTurnCountProvider = sessionTurnCountProvider,
             CancellationToken = CancellationToken.None,
         };
 
@@ -511,8 +823,39 @@ public sealed class BuiltinCommandsTests
         var emptySkills = new Dictionary<string, Aexon.Core.Skills.Skill>();
         var credentialStore = new Aexon.Core.Auth.NyxIdCredentialStore(Path.Combine(Path.GetTempPath(), "aexon-test-nyxid-" + Guid.NewGuid().ToString("N") + ".json"));
         var authService = new Aexon.Core.Auth.NyxIdAuthService(credentialStore: credentialStore);
+        var transcriptStore = new JsonlTranscriptStore(Path.Combine(Path.GetTempPath(), "aexon-transcripts-" + Guid.NewGuid().ToString("N")));
+        var memdirLayout = new MemdirLayout
+        {
+            MemoryBaseDirectory = Path.Combine(Path.GetTempPath(), "aexon-memdir-" + Guid.NewGuid().ToString("N")),
+            ProjectRootDirectory = Path.GetTempPath(),
+        };
         return Assert.IsType<CommandRegistry>(
-            buildMethod!.Invoke(null, [emptySkills, authService, credentialStore, "https://nyx.example.test"]));
+            buildMethod!.Invoke(
+                null,
+                [
+                    emptySkills,
+                    authService,
+                    credentialStore,
+                    "https://nyx.example.test",
+                    transcriptStore,
+                    memdirLayout,
+                    new AnthropicClientSettings(
+                        ApiKey: null,
+                        BaseUrl: null,
+                        Model: null,
+                        MaxTokens: null,
+                        ApiKeyFromEnvironment: false,
+                        ApiKeyFromAppSettings: false,
+                        SourcePath: null,
+                        Diagnostics: []),
+                    new ManagedSettingsLoadResult(ManagedSettingsSnapshot.Empty, [], []),
+                    new NyxIdRuntimeConfig(
+                        "https://nyx.default.test",
+                        "https://nyx.active.test",
+                        HasStoredCredentials: false,
+                        BaseUrlFromEnvironment: false),
+                    cliAssembly,
+                ]));
     }
 
     private sealed record EngineBundle(
@@ -521,5 +864,38 @@ public sealed class BuiltinCommandsTests
         PermissionContext PermissionContext) : IDisposable
     {
         public void Dispose() => Engine.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    private sealed class FakeDoctorCommand(
+        AnthropicClientSettings anthropicSettings,
+        NyxIdRuntimeConfig nyxIdRuntimeConfig) : DoctorCommand(anthropicSettings, nyxIdRuntimeConfig)
+    {
+        protected override Task<(int ExitCode, string StdOut, string StdErr)> RunProcessAsync(
+            string fileName,
+            string arguments,
+            string workingDirectory,
+            CancellationToken cancellationToken)
+        {
+            var output = fileName switch
+            {
+                "dotnet" => "10.0.100",
+                "git" when arguments == "--version" => "git version 2.47.0",
+                "git" when arguments == "rev-parse --is-inside-work-tree" => "true",
+                _ => string.Empty,
+            };
+
+            return Task.FromResult((0, output, string.Empty));
+        }
+
+        protected override Task<System.Net.HttpStatusCode> GetStatusCodeAsync(
+            Uri uri,
+            IReadOnlyDictionary<string, string> headers,
+            CancellationToken cancellationToken)
+        {
+            var code = uri.Host.Contains("anthropic", StringComparison.OrdinalIgnoreCase)
+                ? System.Net.HttpStatusCode.OK
+                : System.Net.HttpStatusCode.NoContent;
+            return Task.FromResult(code);
+        }
     }
 }

@@ -1,12 +1,22 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Net;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Aexon.Core.Agents;
 using Aexon.Core.Auth;
 using Aexon.Core.Commands;
 using Aexon.Core.Compaction;
+using Aexon.Core.Configuration;
+using Aexon.Core.Context;
+using Aexon.Core.Memory;
+using Aexon.Core.Messages;
 using Aexon.Core.Permissions;
 using Aexon.Core.Query;
 using Aexon.Core.Skills;
+using Aexon.Core.Storage;
 using Aexon.Core.Tools;
 
 namespace Aexon.Commands;
@@ -430,48 +440,23 @@ public class CostCommand : ICommand
     {
         var usage = context.QueryEngine.TotalUsage;
         var messages = context.QueryEngine.Messages;
-        var pricing = ResolvePricing(context.QueryEngine.CurrentModel);
-
-        var inputCost = usage.InputTokens * pricing.InputPerMillion / 1_000_000;
-        var outputCost = usage.OutputTokens * pricing.OutputPerMillion / 1_000_000;
-        var cacheReadCost = usage.CacheReadInputTokens * pricing.CacheReadPerMillion / 1_000_000;
-        var cacheWriteCost = usage.CacheCreationInputTokens * pricing.CacheWritePerMillion / 1_000_000;
-        var totalCost = inputCost + outputCost + cacheReadCost + cacheWriteCost;
+        var estimate = UsageCostCalculator.Estimate(context.QueryEngine.CurrentModel, usage);
 
         context.WriteLine($"""
 
           Token Usage:
-            Input:       {usage.InputTokens,10:N0}  (${inputCost:F4})
-            Cache Write: {usage.CacheCreationInputTokens,10:N0}  (${cacheWriteCost:F4})
-            Cache Read:  {usage.CacheReadInputTokens,10:N0}  (${cacheReadCost:F4})
-            Output:      {usage.OutputTokens,10:N0}  (${outputCost:F4})
+            Input:       {usage.InputTokens,10:N0}  (${estimate.InputCost:F4})
+            Cache Write: {usage.CacheCreationInputTokens,10:N0}  (${estimate.CacheWriteCost:F4})
+            Cache Read:  {usage.CacheReadInputTokens,10:N0}  (${estimate.CacheReadCost:F4})
+            Output:      {usage.OutputTokens,10:N0}  (${estimate.OutputCost:F4})
             ───────────────────────────
             Input Total: {usage.TotalInputTokens,10:N0}
             Hit Rate:    {usage.CacheHitRate,10:P1}
-            Total:       {usage.TotalTokens,10:N0}  (${totalCost:F4})
+            Total:       {usage.TotalTokens,10:N0}  (${estimate.TotalCost:F4})
             Messages:    {messages.Count,10:N0}
         """);
         return Task.CompletedTask;
     }
-
-    private static UsagePricing ResolvePricing(string modelOrAlias)
-    {
-        var stableId = ClaudeModelCatalog.TryResolve(modelOrAlias)?.StableId;
-        return stableId switch
-        {
-            "claude-haiku-4-5" => new UsagePricing(1.0, 1.25, 0.10, 5.0),
-            "claude-3-5-haiku" => new UsagePricing(0.8, 1.0, 0.08, 4.0),
-            "claude-opus-4" or "claude-opus-4-1" => new UsagePricing(15.0, 18.75, 1.5, 75.0),
-            "claude-opus-4-5" or "claude-opus-4-6" => new UsagePricing(5.0, 6.25, 0.5, 25.0),
-            _ => new UsagePricing(3.0, 3.75, 0.3, 15.0),
-        };
-    }
-
-    private sealed record UsagePricing(
-        double InputPerMillion,
-        double CacheWritePerMillion,
-        double CacheReadPerMillion,
-        double OutputPerMillion);
 }
 
 /// <summary>
@@ -2567,5 +2552,937 @@ public class AwayCommand : ICommand
             changed
                 ? $"  Away mode enabled. Reason: {defaultReason}"
                 : "  Away mode is already active.");
+    }
+}
+
+/// <summary>
+/// Describes NyxID runtime config surfaced to slash commands.
+/// </summary>
+public sealed record NyxIdRuntimeConfig(
+    string DefaultBaseUrl,
+    string ActiveBaseUrl,
+    bool HasStoredCredentials,
+    bool BaseUrlFromEnvironment);
+
+/// <summary>
+/// Represents config command.
+/// </summary>
+public sealed class ConfigCommand(
+    AnthropicClientSettings anthropicSettings,
+    ManagedSettingsLoadResult managedSettings,
+    NyxIdRuntimeConfig nyxIdRuntimeConfig) : ICommand
+{
+    public string Name => "config";
+    public string Description => "Show runtime config and config source details";
+
+    public Task ExecuteAsync(string args, CommandContext context)
+    {
+        var trimmed = args.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed) ||
+            string.Equals(trimmed, "list", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteEntries(context, BuildEntries(context));
+            return Task.CompletedTask;
+        }
+
+        var parts = trimmed.Split(' ', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 2 &&
+            string.Equals(parts[0], "get", StringComparison.OrdinalIgnoreCase))
+        {
+            var entries = BuildEntries(context);
+            if (entries.TryGetValue(parts[1], out var value))
+            {
+                context.WriteLine($"  {parts[1]}: {value}");
+                return Task.CompletedTask;
+            }
+
+            context.WriteLine($"  Unknown config key: {parts[1]}");
+            context.WriteLine($"  Available keys: {string.Join(", ", entries.Keys)}");
+            return Task.CompletedTask;
+        }
+
+        context.WriteLine("  Usage: /config [list], /config get <key>");
+        return Task.CompletedTask;
+    }
+
+    private Dictionary<string, string> BuildEntries(CommandContext context)
+    {
+        var apiKeySource = anthropicSettings.ApiKeyFromEnvironment
+            ? "env:ANTHROPIC_API_KEY"
+            : anthropicSettings.ApiKeyFromAppSettings
+                ? anthropicSettings.SourcePath ?? "appsettings.secrets.json"
+                : "(none)";
+        var nyxIdSource = nyxIdRuntimeConfig.BaseUrlFromEnvironment
+            ? "env:NYXID_BASE_URL"
+            : nyxIdRuntimeConfig.HasStoredCredentials
+                ? "stored-credentials/default"
+                : "default";
+
+        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["model"] = context.QueryEngine.CurrentModel,
+            ["provider"] = context.AiProvider.ToString(),
+            ["effort"] = context.QueryEngine.CurrentEffort.ToString(),
+            ["workingDirectory"] = context.PermissionContext.WorkingDirectory,
+            ["permissionMode"] = context.PermissionContext.Mode.ToString(),
+            ["anthropic.apiKeySource"] = apiKeySource,
+            ["anthropic.sourcePath"] = anthropicSettings.SourcePath ?? "(none)",
+            ["anthropic.baseUrl"] = anthropicSettings.BaseUrl ?? "(default)",
+            ["anthropic.defaultModel"] = anthropicSettings.Model ?? "(none)",
+            ["anthropic.maxTokens"] = anthropicSettings.MaxTokens?.ToString(CultureInfo.InvariantCulture) ?? "(none)",
+            ["managed.settingsSources"] = managedSettings.SourcePaths.Count == 0
+                ? "(none)"
+                : string.Join(", ", managedSettings.SourcePaths),
+            ["managed.activeSource"] = managedSettings.Settings.SourcePath ?? "(none)",
+            ["nyxid.defaultBaseUrl"] = nyxIdRuntimeConfig.DefaultBaseUrl,
+            ["nyxid.activeBaseUrl"] = nyxIdRuntimeConfig.ActiveBaseUrl,
+            ["nyxid.baseUrlSource"] = nyxIdSource,
+            ["nyxid.hasStoredCredentials"] = nyxIdRuntimeConfig.HasStoredCredentials ? "true" : "false",
+        };
+    }
+
+    private static void WriteEntries(CommandContext context, IReadOnlyDictionary<string, string> entries)
+    {
+        context.WriteLine("  Runtime config:");
+        foreach (var entry in entries)
+            context.WriteLine($"    {entry.Key}: {entry.Value}");
+    }
+}
+
+/// <summary>
+/// Represents permissions command.
+/// </summary>
+public sealed class PermissionsCommand : ICommand
+{
+    public string Name => "permissions";
+    public string Description => "Show or clear current permission rules";
+
+    public Task ExecuteAsync(string args, CommandContext context)
+    {
+        var trimmed = args.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed) ||
+            string.Equals(trimmed, "list", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(trimmed, "show", StringComparison.OrdinalIgnoreCase))
+        {
+            WritePermissions(context);
+            return Task.CompletedTask;
+        }
+
+        if (string.Equals(trimmed, "clear", StringComparison.OrdinalIgnoreCase))
+            return ClearPermissionsAsync(context);
+
+        context.WriteLine("  Usage: /permissions [list|show], /permissions clear");
+        return Task.CompletedTask;
+    }
+
+    private static void WritePermissions(CommandContext context)
+    {
+        context.WriteLine($"  Mode: {context.PermissionContext.Mode}");
+        if (context.PermissionContext.Rules.Count == 0)
+        {
+            context.WriteLine("  Rules: (none)");
+            return;
+        }
+
+        for (var index = 0; index < context.PermissionContext.Rules.Count; index++)
+        {
+            var rule = context.PermissionContext.Rules[index];
+            context.WriteLine(
+                $"  Rule {index + 1}: ToolName={rule.ToolName}, RuleContent={rule.RuleContent ?? "(none)"}, Behavior={rule.Behavior}");
+        }
+    }
+
+    private static Task ClearPermissionsAsync(CommandContext context)
+    {
+        var totalRules =
+            context.PermissionContext.Rules.Count +
+            context.PermissionContext.ToolRules.Count +
+            context.PermissionContext.AlwaysAllowRules.Count +
+            context.PermissionContext.AlwaysAskRules.Count +
+            context.PermissionContext.AlwaysDenyRules.Count;
+
+        if (totalRules == 0)
+        {
+            context.WriteLine("  No permission rules are currently set.");
+            return Task.CompletedTask;
+        }
+
+        if (context.ReadInputLine == null)
+        {
+            context.WriteLine("  Confirmation input is unavailable in this context.");
+            return Task.CompletedTask;
+        }
+
+        context.WriteLine($"  Type 'yes' to clear {totalRules} permission rule(s):");
+        var confirmation = context.ReadInputLine()?.Trim();
+        if (!string.Equals(confirmation, "yes", StringComparison.OrdinalIgnoreCase))
+        {
+            context.WriteLine("  Permission rule clear cancelled.");
+            return Task.CompletedTask;
+        }
+
+        context.PermissionContext.Rules.Clear();
+        context.PermissionContext.ToolRules.Clear();
+        context.PermissionContext.AlwaysAllowRules.Clear();
+        context.PermissionContext.AlwaysAskRules.Clear();
+        context.PermissionContext.AlwaysDenyRules.Clear();
+        context.WriteLine($"  Cleared {totalRules} permission rule(s).");
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Represents memory command.
+/// </summary>
+public sealed class MemoryCommand(
+    MemdirLayout memdirLayout,
+    string? userClaudeDirectory = null,
+    string? systemClaudeDirectory = null) : ICommand
+{
+    public string Name => "memory";
+    public string Description => "List, show, or search loaded memory files";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        var trimmed = args.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed) ||
+            string.Equals(trimmed, "list", StringComparison.OrdinalIgnoreCase))
+        {
+            await ListAsync(context);
+            return;
+        }
+
+        var parts = trimmed.Split(' ', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 2 && string.Equals(parts[0], "show", StringComparison.OrdinalIgnoreCase))
+        {
+            await ShowAsync(parts[1], context);
+            return;
+        }
+
+        if (parts.Length == 2 && string.Equals(parts[0], "search", StringComparison.OrdinalIgnoreCase))
+        {
+            await SearchAsync(parts[1], context);
+            return;
+        }
+
+        context.WriteLine("  Usage: /memory [list], /memory show <name>, /memory search <term>");
+    }
+
+    private async Task ListAsync(CommandContext context)
+    {
+        var files = await GetKnownFilesAsync(context);
+        if (files.Count == 0)
+        {
+            context.WriteLine("  No memory files were found.");
+            return;
+        }
+
+        context.WriteLine("  Memory files:");
+        foreach (var file in files)
+        {
+            var modified = file.ModifiedAt.HasValue
+                ? file.ModifiedAt.Value.ToString("yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture)
+                : "(unknown)";
+            context.WriteLine($"    {file.Name}: {file.Path} (modified {modified})");
+        }
+    }
+
+    private async Task ShowAsync(string name, CommandContext context)
+    {
+        var file = await ResolveFileAsync(name, context);
+        if (file == null)
+        {
+            context.WriteLine($"  No memory file matched '{name}'.");
+            return;
+        }
+
+        var lines = await File.ReadAllLinesAsync(file.Path, context.CancellationToken);
+        context.WriteLine($"  {file.Name}: {file.Path}");
+        foreach (var line in lines.Take(200))
+            context.WriteLine(line);
+
+        if (lines.Length > 200)
+            context.WriteLine($"  ... truncated after 200 lines ({lines.Length - 200} more line(s))");
+    }
+
+    private async Task SearchAsync(string term, CommandContext context)
+    {
+        if (string.IsNullOrWhiteSpace(term))
+        {
+            context.WriteLine("  Search term is required.");
+            return;
+        }
+
+        var files = await GetKnownFilesAsync(context);
+        var matches = new List<string>();
+        foreach (var file in files)
+        {
+            var lines = await File.ReadAllLinesAsync(file.Path, context.CancellationToken);
+            for (var index = 0; index < lines.Length; index++)
+            {
+                if (lines[index].Contains(term, StringComparison.OrdinalIgnoreCase))
+                    matches.Add($"{file.Path}:{index + 1}: {lines[index].Trim()}");
+            }
+        }
+
+        if (matches.Count == 0)
+        {
+            context.WriteLine($"  No memory matches found for '{term}'.");
+            return;
+        }
+
+        context.WriteLine($"  Matches for '{term}':");
+        foreach (var match in matches)
+            context.WriteLine($"    {match}");
+    }
+
+    private async Task<KnownMemoryFile?> ResolveFileAsync(string name, CommandContext context)
+    {
+        var files = await GetKnownFilesAsync(context);
+        return files.FirstOrDefault(file => string.Equals(file.Name, name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<IReadOnlyList<KnownMemoryFile>> GetKnownFilesAsync(CommandContext context)
+    {
+        var files = new List<KnownMemoryFile>();
+        var scan = await MemoryInstructionScanner.ScanAsync(
+            new MemoryInstructionScanOptions
+            {
+                WorkingDirectory = context.PermissionContext.WorkingDirectory,
+                UserClaudeDirectory = userClaudeDirectory,
+                SystemClaudeDirectory = systemClaudeDirectory,
+            },
+            context.CancellationToken);
+
+        foreach (var group in scan.Files.GroupBy(file => file.Scope))
+        {
+            var grouped = group.ToArray();
+            var prefix = group.Key.ToString().ToLowerInvariant();
+            for (var index = 0; index < grouped.Length; index++)
+            {
+                var item = grouped[index];
+                files.Add(new KnownMemoryFile(
+                    grouped.Length == 1 ? prefix : $"{prefix}-{index + 1}",
+                    item.Path,
+                    File.Exists(item.Path) ? new DateTimeOffset(File.GetLastWriteTimeUtc(item.Path), TimeSpan.Zero) : null));
+            }
+        }
+
+        AddMemdirFile(files, "memdir-project", memdirLayout.MemoryIndexPath);
+
+        if (Directory.Exists(memdirLayout.SessionMemoryDirectory))
+        {
+            foreach (var path in Directory.EnumerateFiles(memdirLayout.SessionMemoryDirectory, "SESSION_MEMORY.md", SearchOption.AllDirectories))
+            {
+                var directoryName = Path.GetFileName(Path.GetDirectoryName(path)) ?? "session";
+                AddMemdirFile(files, $"memdir-session-{directoryName}", path);
+            }
+        }
+
+        if (Directory.Exists(memdirLayout.TeamMemoryDirectory))
+        {
+            foreach (var path in Directory.EnumerateFiles(memdirLayout.TeamMemoryDirectory, "TEAM_MEMORY.md", SearchOption.AllDirectories))
+            {
+                var directoryName = Path.GetFileName(Path.GetDirectoryName(path)) ?? "team";
+                AddMemdirFile(files, $"memdir-team-{directoryName}", path);
+            }
+        }
+
+        return files
+            .OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static void AddMemdirFile(
+        ICollection<KnownMemoryFile> files,
+        string name,
+        string path)
+    {
+        if (!File.Exists(path))
+            return;
+
+        files.Add(new KnownMemoryFile(name, path, new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero)));
+    }
+
+    private sealed record KnownMemoryFile(
+        string Name,
+        string Path,
+        DateTimeOffset? ModifiedAt);
+}
+
+/// <summary>
+/// Represents init command.
+/// </summary>
+public sealed class InitCommand : ICommand
+{
+    public string Name => "init";
+    public string Description => "Scaffold a CLAUDE.md file in the working directory";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        var force = string.Equals(args.Trim(), "--force", StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(args) && !force)
+        {
+            context.WriteLine("  Usage: /init [--force]");
+            return;
+        }
+
+        var path = Path.Combine(context.PermissionContext.WorkingDirectory, "CLAUDE.md");
+        if (File.Exists(path) && !force)
+        {
+            context.WriteLine($"  Refusing to overwrite existing file: {path}");
+            context.WriteLine("  Re-run with /init --force to overwrite it.");
+            return;
+        }
+
+        await File.WriteAllTextAsync(path, ClaudeInitTemplate, context.CancellationToken);
+        context.WriteLine($"  Wrote CLAUDE.md scaffold: {path}");
+    }
+
+    private const string ClaudeInitTemplate =
+        """
+        # Project Description
+        - TODO: describe what this project does and who it serves
+
+        ## Tech Stack
+        - Runtime:
+        - Frameworks:
+        - Tooling:
+
+        ## Conventions
+        - Architecture:
+        - Coding style:
+        - Review expectations:
+
+        ## Test Commands
+        - Build:
+        - Test:
+        - Format/Lint:
+        """;
+}
+
+/// <summary>
+/// Represents doctor command.
+/// </summary>
+public class DoctorCommand(
+    AnthropicClientSettings anthropicSettings,
+    NyxIdRuntimeConfig nyxIdRuntimeConfig) : ICommand
+{
+    public string Name => "doctor";
+    public string Description => "Run local diagnostics for the current Aexon session";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        var checks = new List<(bool Success, string Message)>
+        {
+            await CheckDotnetAsync(context),
+            await CheckGitBinaryAsync(context),
+            await CheckGitRepositoryAsync(context),
+            await CheckAnthropicAsync(context),
+            await CheckNyxIdAsync(context),
+        };
+
+        var passCount = checks.Count(check => check.Success);
+        foreach (var check in checks)
+            context.WriteLine($"{(check.Success ? "[OK]" : "[FAIL]")} {check.Message}");
+
+        context.WriteLine($"  Summary: {passCount} passed, {checks.Count - passCount} failed.");
+    }
+
+    protected virtual async Task<(int ExitCode, string StdOut, string StdErr)> RunProcessAsync(
+        string fileName,
+        string arguments,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        using var process = new Process();
+        process.StartInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            Arguments = arguments,
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        process.Start();
+        var stdOutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var stdErrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+        return (process.ExitCode, await stdOutTask, await stdErrTask);
+    }
+
+    protected virtual async Task<HttpStatusCode> GetStatusCodeAsync(
+        Uri uri,
+        IReadOnlyDictionary<string, string> headers,
+        CancellationToken cancellationToken)
+    {
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(5),
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        foreach (var header in headers)
+            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+        using var response = await httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+
+        return response.StatusCode;
+    }
+
+    private async Task<(bool Success, string Message)> CheckDotnetAsync(CommandContext context)
+    {
+        try
+        {
+            var result = await RunProcessAsync("dotnet", "--version", context.PermissionContext.WorkingDirectory, context.CancellationToken);
+            return result.ExitCode == 0
+                ? (true, $"dotnet SDK: {result.StdOut.Trim()}")
+                : (false, $"dotnet SDK: {NormalizeError(result)}");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"dotnet SDK: {ex.Message}");
+        }
+    }
+
+    private async Task<(bool Success, string Message)> CheckGitBinaryAsync(CommandContext context)
+    {
+        try
+        {
+            var result = await RunProcessAsync("git", "--version", context.PermissionContext.WorkingDirectory, context.CancellationToken);
+            return result.ExitCode == 0
+                ? (true, $"git binary: {result.StdOut.Trim()}")
+                : (false, $"git binary: {NormalizeError(result)}");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"git binary: {ex.Message}");
+        }
+    }
+
+    private async Task<(bool Success, string Message)> CheckGitRepositoryAsync(CommandContext context)
+    {
+        try
+        {
+            var result = await RunProcessAsync(
+                "git",
+                "rev-parse --is-inside-work-tree",
+                context.PermissionContext.WorkingDirectory,
+                context.CancellationToken);
+            return result.ExitCode == 0 && result.StdOut.Trim().Equals("true", StringComparison.OrdinalIgnoreCase)
+                ? (true, $"working directory is a git repo: {context.PermissionContext.WorkingDirectory}")
+                : (false, $"working directory is a git repo: {NormalizeError(result)}");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"working directory is a git repo: {ex.Message}");
+        }
+    }
+
+    private async Task<(bool Success, string Message)> CheckAnthropicAsync(CommandContext context)
+    {
+        if (string.IsNullOrWhiteSpace(anthropicSettings.ApiKey))
+            return (false, "Anthropic connectivity: no API key is configured.");
+
+        try
+        {
+            var statusCode = await GetStatusCodeAsync(
+                new Uri("https://api.anthropic.com/v1/models"),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["x-api-key"] = anthropicSettings.ApiKey,
+                    ["anthropic-version"] = "2023-06-01",
+                },
+                context.CancellationToken);
+            return (true, $"Anthropic connectivity: HTTP {(int)statusCode}");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Anthropic connectivity: {ex.Message}");
+        }
+    }
+
+    private async Task<(bool Success, string Message)> CheckNyxIdAsync(CommandContext context)
+    {
+        if (string.IsNullOrWhiteSpace(nyxIdRuntimeConfig.ActiveBaseUrl) ||
+            !Uri.TryCreate(nyxIdRuntimeConfig.ActiveBaseUrl, UriKind.Absolute, out var uri))
+        {
+            return (false, "NyxID connectivity: base URL is not configured.");
+        }
+
+        try
+        {
+            var statusCode = await GetStatusCodeAsync(uri, new Dictionary<string, string>(), context.CancellationToken);
+            return (true, $"NyxID connectivity: HTTP {(int)statusCode}");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"NyxID connectivity: {ex.Message}");
+        }
+    }
+
+    private static string NormalizeError((int ExitCode, string StdOut, string StdErr) result)
+    {
+        var text = string.IsNullOrWhiteSpace(result.StdErr)
+            ? result.StdOut
+            : result.StdErr;
+        text = text.Trim();
+        return string.IsNullOrWhiteSpace(text)
+            ? $"exit code {result.ExitCode}"
+            : text;
+    }
+}
+
+/// <summary>
+/// Represents version command.
+/// </summary>
+public sealed class VersionCommand(Assembly? productAssembly = null) : ICommand
+{
+    public string Name => "version";
+    public string Description => "Show Aexon product and runtime version";
+
+    public Task ExecuteAsync(string args, CommandContext context)
+    {
+        var assembly = productAssembly ?? Assembly.GetEntryAssembly() ?? typeof(VersionCommand).Assembly;
+        context.WriteLine($"  Product version: {assembly.GetName().Version?.ToString() ?? "(unknown)"}");
+        context.WriteLine($"  .NET runtime: {RuntimeInformation.FrameworkDescription} ({Environment.Version})");
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Represents status command.
+/// </summary>
+public sealed class StatusCommand : ICommand
+{
+    public string Name => "status";
+    public string Description => "Show the current session status snapshot";
+
+    public Task ExecuteAsync(string args, CommandContext context)
+    {
+        var usage = context.QueryEngine.TotalUsage;
+        var duration = context.SessionStartedAt.HasValue
+            ? DateTimeOffset.UtcNow - context.SessionStartedAt.Value
+            : TimeSpan.Zero;
+        var activeSubagents = CountActiveSubagents(context.AgentTaskRuntime);
+
+        context.WriteLine($"  Session ID: {context.QueryEngine.SessionId ?? "(ephemeral)"}");
+        context.WriteLine($"  Model: {context.QueryEngine.CurrentModel}");
+        context.WriteLine($"  Provider: {context.AiProvider}");
+        context.WriteLine($"  Working directory: {context.PermissionContext.WorkingDirectory}");
+        context.WriteLine($"  Session duration: {CommandFormatting.FormatDuration(duration)}");
+        context.WriteLine($"  Total turns: {context.CurrentSessionTurnCount}");
+        context.WriteLine($"  Tokens: input={usage.InputTokens:N0}, cache-write={usage.CacheCreationInputTokens:N0}, cache-read={usage.CacheReadInputTokens:N0}, output={usage.OutputTokens:N0}, total={usage.TotalTokens:N0}");
+        context.WriteLine($"  Active subagents: {activeSubagents}");
+        return Task.CompletedTask;
+    }
+
+    private static int CountActiveSubagents(IAgentTaskRuntime runtime)
+    {
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in runtime.ListWorkItems())
+        {
+            if (item.Status is AgentWorkItemStatus.Completed or AgentWorkItemStatus.Cancelled)
+                continue;
+
+            if (!string.IsNullOrWhiteSpace(item.SubagentId))
+                ids.Add(item.SubagentId);
+        }
+
+        foreach (var run in runtime.ListBackgroundRuns())
+        {
+            if (run.Status is AgentBackgroundRunStatus.Stopped or
+                AgentBackgroundRunStatus.Failed or
+                AgentBackgroundRunStatus.Cancelled)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(run.SubagentId))
+                ids.Add(run.SubagentId);
+        }
+
+        return ids.Count;
+    }
+}
+
+/// <summary>
+/// Represents resume command.
+/// </summary>
+public sealed class ResumeCommand(ITranscriptStore transcriptStore) : ICommand
+{
+    public string Name => "resume";
+    public string Description => "List recent sessions and print resume guidance";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        var trimmed = args.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            await ListRecentSessionsAsync(context);
+            return;
+        }
+
+        var session = await transcriptStore.FindSessionAsync(trimmed, context.CancellationToken);
+        if (session == null)
+        {
+            context.WriteLine($"  No session matched '{trimmed}'.");
+            return;
+        }
+
+        WriteStubGuidance(session, context);
+    }
+
+    private async Task ListRecentSessionsAsync(CommandContext context)
+    {
+        var sessions = (await transcriptStore.ListSessionsAsync(context.CancellationToken))
+            .Take(10)
+            .ToArray();
+        if (sessions.Length == 0)
+        {
+            context.WriteLine("  No saved sessions were found.");
+            return;
+        }
+
+        context.WriteLine("  Recent sessions:");
+        for (var index = 0; index < sessions.Length; index++)
+        {
+            var session = sessions[index];
+            context.WriteLine(
+                $"    {index + 1}. {session.SessionId} | {session.UpdatedAt:yyyy-MM-dd HH:mm:ss zzz} | {session.Metadata.Title ?? "(untitled)"}");
+        }
+
+        if (context.ReadInputLine == null)
+        {
+            context.WriteLine("  In-process resume is not available in this context. Restart with `aexon --resume <id>` or `aexon --continue`.");
+            return;
+        }
+
+        context.WriteLine("  Pick a session number to resume, or press Enter to cancel:");
+        var raw = context.ReadInputLine()?.Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            context.WriteLine("  Resume cancelled.");
+            return;
+        }
+
+        if (!int.TryParse(raw, out var selectedIndex) ||
+            selectedIndex < 1 ||
+            selectedIndex > sessions.Length)
+        {
+            context.WriteLine($"  Invalid selection: {raw}");
+            return;
+        }
+
+        WriteStubGuidance(sessions[selectedIndex - 1], context);
+    }
+
+    private static void WriteStubGuidance(TranscriptSession session, CommandContext context)
+    {
+        context.WriteLine($"  Selected session: {session.SessionId}");
+        context.WriteLine("  In-process resume is not wired into the active REPL yet.");
+        context.WriteLine($"  Restart with: aexon --resume {session.SessionId}");
+        context.WriteLine("  Or restart the latest session with: aexon --continue");
+    }
+}
+
+/// <summary>
+/// Represents rename command.
+/// </summary>
+public sealed class RenameCommand : ICommand
+{
+    public string Name => "rename";
+    public string Description => "Show or rename the current session title";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        var trimmed = args.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            context.WriteLine($"  Current title: {context.QueryEngine.SessionMetadata.Title ?? "(none)"}");
+            return;
+        }
+
+        await context.QueryEngine.SetSessionTitleAsync(trimmed, context.CancellationToken);
+        context.WriteLine($"  Session title renamed to: {trimmed}");
+    }
+}
+
+/// <summary>
+/// Represents stats command.
+/// </summary>
+public sealed class StatsCommand(ITranscriptStore transcriptStore) : ICommand
+{
+    private readonly ConversationRecovery _recovery = new();
+
+    public string Name => "stats";
+    public string Description => "Aggregate recent session usage and cost";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        if (!TryParseWindow(args, out var since, out var error))
+        {
+            context.WriteLine(error ?? "  Usage: /stats [--since <duration>]");
+            return;
+        }
+
+        var cutoff = DateTimeOffset.UtcNow - since;
+        var sessions = (await transcriptStore.ListSessionsAsync(context.CancellationToken))
+            .Where(session => session.UpdatedAt >= cutoff)
+            .ToArray();
+
+        var totalUsage = TokenUsage.Empty;
+        double totalCost = 0;
+        foreach (var session in sessions)
+        {
+            var projection = await transcriptStore.LoadProjectionAsync(
+                session,
+                new TranscriptLoadOptions(),
+                context.CancellationToken);
+            var usage = _recovery.Recover(projection).TotalUsage;
+            totalUsage += usage;
+            totalCost += UsageCostCalculator.Estimate(session.Model, usage).TotalCost;
+        }
+
+        context.WriteLine($"  Window: last {CommandFormatting.FormatWindow(since)}");
+        context.WriteLine($"  Total sessions: {sessions.Length}");
+        context.WriteLine($"  Total tokens: {totalUsage.TotalTokens:N0}");
+        context.WriteLine($"  Input tokens: {totalUsage.InputTokens:N0}");
+        context.WriteLine($"  Cache write tokens: {totalUsage.CacheCreationInputTokens:N0}");
+        context.WriteLine($"  Cache read tokens: {totalUsage.CacheReadInputTokens:N0}");
+        context.WriteLine($"  Output tokens: {totalUsage.OutputTokens:N0}");
+        context.WriteLine($"  Estimated cost: ${totalCost:F4}");
+    }
+
+    private static bool TryParseWindow(
+        string args,
+        out TimeSpan since,
+        out string? error)
+    {
+        since = TimeSpan.FromDays(30);
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(args))
+            return true;
+
+        var parts = args.Split(' ', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 2 &&
+            string.Equals(parts[0], "--since", StringComparison.OrdinalIgnoreCase) &&
+            CommandFormatting.TryParseDuration(parts[1], out since))
+        {
+            return true;
+        }
+
+        error = "  Usage: /stats [--since <duration>]";
+        return false;
+    }
+}
+
+internal static class UsageCostCalculator
+{
+    public static UsageCostEstimate Estimate(string modelOrAlias, TokenUsage usage)
+    {
+        var pricing = ResolvePricing(modelOrAlias);
+        var inputCost = usage.InputTokens * pricing.InputPerMillion / 1_000_000;
+        var outputCost = usage.OutputTokens * pricing.OutputPerMillion / 1_000_000;
+        var cacheReadCost = usage.CacheReadInputTokens * pricing.CacheReadPerMillion / 1_000_000;
+        var cacheWriteCost = usage.CacheCreationInputTokens * pricing.CacheWritePerMillion / 1_000_000;
+
+        return new UsageCostEstimate(
+            inputCost,
+            cacheWriteCost,
+            cacheReadCost,
+            outputCost,
+            inputCost + cacheWriteCost + cacheReadCost + outputCost);
+    }
+
+    private static UsagePricing ResolvePricing(string modelOrAlias)
+    {
+        var stableId = ClaudeModelCatalog.TryResolve(modelOrAlias)?.StableId;
+        return stableId switch
+        {
+            "claude-haiku-4-5" => new UsagePricing(1.0, 1.25, 0.10, 5.0),
+            "claude-3-5-haiku" => new UsagePricing(0.8, 1.0, 0.08, 4.0),
+            "claude-opus-4" or "claude-opus-4-1" => new UsagePricing(15.0, 18.75, 1.5, 75.0),
+            "claude-opus-4-5" or "claude-opus-4-6" => new UsagePricing(5.0, 6.25, 0.5, 25.0),
+            _ => new UsagePricing(3.0, 3.75, 0.3, 15.0),
+        };
+    }
+
+    internal sealed record UsageCostEstimate(
+        double InputCost,
+        double CacheWriteCost,
+        double CacheReadCost,
+        double OutputCost,
+        double TotalCost);
+
+    private sealed record UsagePricing(
+        double InputPerMillion,
+        double CacheWritePerMillion,
+        double CacheReadPerMillion,
+        double OutputPerMillion);
+}
+
+internal static class CommandFormatting
+{
+    public static string FormatDuration(TimeSpan duration)
+    {
+        if (duration.TotalDays >= 1)
+            return $"{(int)duration.TotalDays}d {duration.Hours}h {duration.Minutes}m";
+        if (duration.TotalHours >= 1)
+            return $"{(int)duration.TotalHours}h {duration.Minutes}m {duration.Seconds}s";
+
+        return $"{(int)duration.TotalMinutes}m {duration.Seconds}s";
+    }
+
+    public static string FormatWindow(TimeSpan duration)
+    {
+        if (duration.TotalDays >= 1)
+            return $"{duration.TotalDays:0.#} day(s)";
+        if (duration.TotalHours >= 1)
+            return $"{duration.TotalHours:0.#} hour(s)";
+        if (duration.TotalMinutes >= 1)
+            return $"{duration.TotalMinutes:0.#} minute(s)";
+
+        return $"{duration.TotalSeconds:0.#} second(s)";
+    }
+
+    public static bool TryParseDuration(string raw, out TimeSpan duration)
+    {
+        duration = TimeSpan.Zero;
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        var trimmed = raw.Trim();
+        if (TimeSpan.TryParse(trimmed, CultureInfo.InvariantCulture, out duration))
+            return duration > TimeSpan.Zero;
+
+        if (trimmed.Length < 2)
+            return false;
+
+        var suffix = char.ToLowerInvariant(trimmed[^1]);
+        if (!double.TryParse(trimmed[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ||
+            value <= 0)
+        {
+            return false;
+        }
+
+        duration = suffix switch
+        {
+            's' => TimeSpan.FromSeconds(value),
+            'm' => TimeSpan.FromMinutes(value),
+            'h' => TimeSpan.FromHours(value),
+            'd' => TimeSpan.FromDays(value),
+            'w' => TimeSpan.FromDays(value * 7),
+            _ => TimeSpan.Zero,
+        };
+
+        return duration > TimeSpan.Zero;
     }
 }

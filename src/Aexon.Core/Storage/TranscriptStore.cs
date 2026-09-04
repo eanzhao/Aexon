@@ -64,6 +64,9 @@ public interface ITranscriptStore
         string model,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<TranscriptSession>> ListSessionsAsync(
+        CancellationToken cancellationToken = default);
+
     Task<TranscriptSession?> GetLatestSessionAsync(
         CancellationToken cancellationToken = default);
 
@@ -586,25 +589,32 @@ public sealed class JsonlTranscriptStore : ITranscriptStore
     public async Task<TranscriptSession?> GetLatestSessionAsync(
         CancellationToken cancellationToken = default)
     {
+        return (await ListSessionsAsync(cancellationToken))
+            .FirstOrDefault();
+    }
+
+    public async Task<IReadOnlyList<TranscriptSession>> ListSessionsAsync(
+        CancellationToken cancellationToken = default)
+    {
         var sessionsDirectory = GetSessionsDirectory();
         if (!Directory.Exists(sessionsDirectory))
-            return null;
+            return [];
 
-        TranscriptSession? latest = null;
+        var sessions = new List<TranscriptSession>();
         foreach (var manifestPath in Directory.EnumerateFiles(
                      sessionsDirectory,
                      ManifestFileName,
                      SearchOption.AllDirectories))
         {
             var session = await LoadManifestAsync(manifestPath, cancellationToken);
-            if (session == null)
-                continue;
-
-            if (latest == null || session.UpdatedAt > latest.UpdatedAt)
-                latest = session;
+            if (session != null)
+                sessions.Add(session);
         }
 
-        return latest;
+        return sessions
+            .OrderByDescending(session => session.UpdatedAt)
+            .ThenByDescending(session => session.CreatedAt)
+            .ToArray();
     }
 
     public async Task<TranscriptSession?> FindSessionAsync(

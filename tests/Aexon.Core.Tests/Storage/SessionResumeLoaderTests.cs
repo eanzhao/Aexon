@@ -93,6 +93,10 @@ public sealed class SessionResumeLoaderTests
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
+        public Task<IReadOnlyList<TranscriptSession>> ListSessionsAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<TranscriptSession>>([]);
+
         public Task<TranscriptSession?> GetLatestSessionAsync(
             CancellationToken cancellationToken = default)
         {

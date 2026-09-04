@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Aexon.Commands;
@@ -275,7 +276,17 @@ internal static class Program
             skillLoader.Load(workingDirectory),
             nyxIdAuthService,
             nyxIdCredentialStore,
-            nyxIdSettings.ActiveBaseUrl);
+            nyxIdSettings.ActiveBaseUrl,
+            transcriptStore,
+            memoryLayout,
+            managedPolicy.AnthropicSettings,
+            managedSettings,
+            new NyxIdRuntimeConfig(
+                nyxIdSettings.DefaultBaseUrl,
+                nyxIdSettings.ActiveBaseUrl,
+                nyxIdSettings.HasStoredCredentials,
+                nyxIdSettings.BaseUrlFromEnvironment),
+            typeof(Program).Assembly);
         await using var mcpRuntime = managedPolicy.AllowExternalMcpServers
             ? await McpRuntime.CreateAsync(
                 toolRegistry,
@@ -707,36 +718,52 @@ internal static class Program
         IReadOnlyDictionary<string, Skill> skills,
         NyxIdAuthService nyxIdAuthService,
         NyxIdCredentialStore nyxIdCredentialStore,
-        string nyxIdBaseUrl)
+        string nyxIdBaseUrl,
+        ITranscriptStore transcriptStore,
+        MemdirLayout memdirLayout,
+        AnthropicClientSettings anthropicSettings,
+        ManagedSettingsLoadResult managedSettings,
+        NyxIdRuntimeConfig nyxIdRuntimeConfig,
+        Assembly productAssembly)
     {
         var registry = new CommandRegistry();
-        registry.Register(new HelpCommand());
+        registry.Register(new AgentsCommand());
+        registry.Register(new AwayCommand());
+        registry.Register(new BranchCommand());
         registry.Register(new ClearCommand());
         registry.Register(new CommitCommand());
         registry.Register(new CompactCommand());
+        registry.Register(new ConfigCommand(anthropicSettings, managedSettings, nyxIdRuntimeConfig));
         registry.Register(new CostCommand());
         registry.Register(new DiffCommand());
+        registry.Register(new DoctorCommand(anthropicSettings, nyxIdRuntimeConfig));
         registry.Register(new EffortCommand());
         registry.Register(new ExitCommand());
         registry.Register(new FastCommand());
-        registry.Register(new AgentsCommand());
-        registry.Register(new BranchCommand());
+        registry.Register(new HelpCommand());
+        registry.Register(new InitCommand());
         registry.Register(new LoginCommand(nyxIdAuthService, nyxIdCredentialStore, nyxIdBaseUrl));
         registry.Register(new LogoutCommand(nyxIdAuthService, nyxIdCredentialStore));
         registry.Register(new MailboxCommand());
-        registry.Register(new ModelCommand());
+        registry.Register(new MemoryCommand(memdirLayout));
         registry.Register(new MicrocompactCommand());
         registry.Register(new ModeCommand());
-        registry.Register(new PlanCommand());
+        registry.Register(new ModelCommand());
         registry.Register(new PartialCompactCommand());
+        registry.Register(new PermissionsCommand());
+        registry.Register(new PlanCommand());
         registry.Register(new PrCommand());
+        registry.Register(new RenameCommand());
+        registry.Register(new ResumeCommand(transcriptStore));
         registry.Register(new ReviewCommand());
         registry.Register(new SessionCommand());
         registry.Register(new SessionMemoryCompactCommand());
+        registry.Register(new StatsCommand(transcriptStore));
+        registry.Register(new StatusCommand());
+        registry.Register(new TagCommand());
         registry.Register(new TeamCommand());
         registry.Register(new TitleCommand());
-        registry.Register(new TagCommand());
-        registry.Register(new AwayCommand());
+        registry.Register(new VersionCommand(productAssembly));
 
         foreach (var skill in skills.Values.OrderBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase))
         {
@@ -804,6 +831,7 @@ Environment:
         private readonly PermissionPrompt _permissionPrompt = new();
         private readonly StatusBar _statusBar = new();
         private readonly DateTimeOffset _sessionStartedAt = DateTimeOffset.UtcNow;
+        private int _sessionTurnCount;
         private bool _exitRequested;
 
         public AexonShell(
@@ -868,6 +896,9 @@ Environment:
                 AgentMessageActivationRuntime = _agentMessageActivationRuntime,
                 Commands = _commandRegistry.GetAll(),
                 DelayAsync = static (delay, cancellationToken) => Task.Delay(delay, cancellationToken),
+                ReadInputLine = Console.ReadLine,
+                SessionStartedAt = _sessionStartedAt,
+                SessionTurnCountProvider = () => _sessionTurnCount,
                 CancellationToken = CancellationToken.None,
                 RequestExit = () => _exitRequested = true,
                 RequestClear = () =>
@@ -1075,10 +1106,15 @@ Environment:
                         }
                         break;
 
-                    case QueryCompleteEvent complete when !complete.Success:
-                        markdownWriter.Flush();
-                        Console.WriteLine();
-                        Console.WriteLine($"请求失败: {complete.ErrorMessage}");
+                    case QueryCompleteEvent complete:
+                        _sessionTurnCount += complete.TurnCount;
+                        if (!complete.Success)
+                        {
+                            markdownWriter.Flush();
+                            Console.WriteLine();
+                            Console.WriteLine($"请求失败: {complete.ErrorMessage}");
+                        }
+
                         break;
                 }
             }
