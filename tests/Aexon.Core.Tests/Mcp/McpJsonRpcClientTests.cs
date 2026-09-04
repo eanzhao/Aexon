@@ -78,6 +78,54 @@ public sealed class McpJsonRpcClientTests
     }
 
     [Fact]
+    public async Task ListResourcesAsync_PaginatesAndParsesDescriptors()
+    {
+        await using var transport = new FakeLineTransport(
+        [
+            """{"jsonrpc":"2.0","id":"1","result":{"resources":[{"uri":"file:///alpha.txt","name":"Alpha","description":"first","mimeType":"text/plain"}],"nextCursor":"cursor-2"}}""",
+            """{"jsonrpc":"2.0","id":"2","result":{"resources":[{"uri":"file:///beta.bin","name":"Beta","mimeType":"application/octet-stream"}]}}""",
+        ]);
+        await using var client = new McpJsonRpcClient(transport);
+
+        var resources = await client.ListResourcesAsync();
+
+        Assert.Equal(2, resources.Count);
+        Assert.Equal("file:///alpha.txt", resources[0].Uri);
+        Assert.Equal("Alpha", resources[0].Name);
+        Assert.Equal("first", resources[0].Description);
+        Assert.Equal("text/plain", resources[0].MimeType);
+        Assert.Equal("file:///beta.bin", resources[1].Uri);
+        Assert.Equal("application/octet-stream", resources[1].MimeType);
+        Assert.Equal(2, transport.Writes.Count);
+        Assert.Contains(@"""method"":""resources/list""", transport.Writes[0], StringComparison.Ordinal);
+        Assert.DoesNotContain(@"""cursor""", transport.Writes[0], StringComparison.Ordinal);
+        Assert.Contains(@"""cursor"":""cursor-2""", transport.Writes[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReadResourceAsync_ParsesTextAndBlobContents()
+    {
+        await using var transport = new FakeLineTransport(
+        [
+            """{"jsonrpc":"2.0","id":"1","result":{"contents":[{"uri":"file:///notes.txt","mimeType":"text/plain","text":"hello world"},{"uri":"file:///asset.bin","mimeType":"application/octet-stream","blob":"QUJDRA=="}]}}""",
+        ]);
+        await using var client = new McpJsonRpcClient(transport);
+
+        var result = await client.ReadResourceAsync("file:///notes.txt");
+
+        Assert.Equal(2, result.Contents.Count);
+        Assert.Equal("file:///notes.txt", result.Contents[0].Uri);
+        Assert.Equal("text/plain", result.Contents[0].MimeType);
+        Assert.Equal("hello world", result.Contents[0].Text);
+        Assert.Null(result.Contents[0].Blob);
+        Assert.Equal("file:///asset.bin", result.Contents[1].Uri);
+        Assert.Equal("application/octet-stream", result.Contents[1].MimeType);
+        Assert.Equal("QUJDRA==", result.Contents[1].Blob);
+        Assert.Contains(@"""method"":""resources/read""", Assert.Single(transport.Writes), StringComparison.Ordinal);
+        Assert.Contains(@"""uri"":""file:///notes.txt""", transport.Writes[0], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task SendNotificationAsync_WritesNotificationWithoutRequestId()
     {
         await using var transport = new FakeLineTransport([]);

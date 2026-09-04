@@ -81,6 +81,7 @@ public sealed class McpRuntime : IAsyncDisposable
                     workingDirectory,
                     cancellationToken);
                 _sessions.Add(session);
+                connection.AttachSession(session);
 
                 var tools = await session.ListToolsAsync(cancellationToken);
                 ConnectionManager.UpdateState(server.ServerId, McpConnectionState.Connected);

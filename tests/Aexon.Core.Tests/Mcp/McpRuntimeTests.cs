@@ -120,6 +120,14 @@ public sealed class McpRuntimeTests
         public Task<IReadOnlyList<McpToolDescriptor>> ListToolsAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(_tools);
 
+        public Task<IReadOnlyList<McpResourceDescriptor>> ListResourcesAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<McpResourceDescriptor>>([]);
+
+        public Task<McpReadResourceResult> ReadResourceAsync(
+            string uri,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new McpReadResourceResult([]));
+
         public Task<McpCallToolResult> CallToolAsync(
             string toolName,
             JsonElement arguments,

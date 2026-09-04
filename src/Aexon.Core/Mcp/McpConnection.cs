@@ -9,6 +9,12 @@ public interface IMcpConnection
     Uri? Endpoint { get; }
     McpConnectionState State { get; }
     IReadOnlyList<McpToolDescriptor> Tools { get; }
+    Task<IReadOnlyList<McpResourceDescriptor>> ListResourcesAsync(
+        bool refresh = false,
+        CancellationToken cancellationToken = default);
+    Task<McpReadResourceResult> ReadResourceAsync(
+        string uri,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -17,6 +23,8 @@ public interface IMcpConnection
 public sealed class McpConnection : IMcpConnection
 {
     private readonly List<McpToolDescriptor> _tools = [];
+    private IMcpClientSession? _session;
+    private IReadOnlyList<McpResourceDescriptor>? _cachedResources;
 
     public McpConnection(
         string serverId,
@@ -38,6 +46,13 @@ public sealed class McpConnection : IMcpConnection
     public IReadOnlyList<McpToolDescriptor> Tools => _tools;
     public DateTimeOffset LastUpdatedAt { get; private set; } = DateTimeOffset.UtcNow;
 
+    public void AttachSession(IMcpClientSession session)
+    {
+        _session = session ?? throw new ArgumentNullException(nameof(session));
+        InvalidateResourceCache();
+        LastUpdatedAt = DateTimeOffset.UtcNow;
+    }
+
     public void UpdateState(McpConnectionState state)
     {
         State = state;
@@ -50,4 +65,37 @@ public sealed class McpConnection : IMcpConnection
         _tools.AddRange(tools);
         LastUpdatedAt = DateTimeOffset.UtcNow;
     }
+
+    public async Task<IReadOnlyList<McpResourceDescriptor>> ListResourcesAsync(
+        bool refresh = false,
+        CancellationToken cancellationToken = default)
+    {
+        var session = EnsureReadySession();
+        if (!refresh && _cachedResources != null)
+            return _cachedResources;
+
+        var resources = await session.ListResourcesAsync(cancellationToken);
+        _cachedResources = resources;
+        LastUpdatedAt = DateTimeOffset.UtcNow;
+        return resources;
+    }
+
+    public Task<McpReadResourceResult> ReadResourceAsync(
+        string uri,
+        CancellationToken cancellationToken = default) =>
+        EnsureReadySession().ReadResourceAsync(uri, cancellationToken);
+
+    private IMcpClientSession EnsureReadySession()
+    {
+        if (State != McpConnectionState.Connected || _session == null)
+        {
+            throw new InvalidOperationException(
+                $"MCP server {ServerId} is not connected.");
+        }
+
+        return _session;
+    }
+
+    private void InvalidateResourceCache() =>
+        _cachedResources = null;
 }

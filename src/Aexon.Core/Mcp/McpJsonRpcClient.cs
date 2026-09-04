@@ -122,6 +122,48 @@ public sealed class McpJsonRpcClient : IAsyncDisposable
         }
     }
 
+    public async Task<IReadOnlyList<McpResourceDescriptor>> ListResourcesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var cursor = (string?)null;
+        var resources = new List<McpResourceDescriptor>();
+
+        do
+        {
+            var result = await SendRequestAsync(
+                "resources/list",
+                string.IsNullOrWhiteSpace(cursor) ? null : new { cursor },
+                cancellationToken);
+
+            if (TryGetProperty(result, "resources", out var resourcesElement) &&
+                resourcesElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var resource in resourcesElement.EnumerateArray())
+                    resources.Add(ParseResourceDescriptor(resource));
+            }
+
+            cursor = TryGetString(result, "nextCursor");
+        }
+        while (!string.IsNullOrWhiteSpace(cursor));
+
+        return resources;
+    }
+
+    public async Task<McpReadResourceResult> ReadResourceAsync(
+        string uri,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(uri))
+            throw new ArgumentException("uri is required.", nameof(uri));
+
+        var result = await SendRequestAsync(
+            "resources/read",
+            new { uri },
+            cancellationToken);
+
+        return ParseReadResourceResult(result);
+    }
+
     public async ValueTask DisposeAsync()
     {
         _gate.Dispose();
@@ -192,6 +234,54 @@ public sealed class McpJsonRpcClient : IAsyncDisposable
         TryGetProperty(message, "id", out var responseId) &&
         string.Equals(NormalizeId(responseId), requestId, StringComparison.Ordinal);
 
+    private static McpResourceDescriptor ParseResourceDescriptor(JsonElement resource)
+    {
+        if (!TryGetProperty(resource, "uri", out var uriElement) ||
+            uriElement.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException("MCP resource is missing uri.");
+        }
+
+        if (!TryGetProperty(resource, "name", out var nameElement) ||
+            nameElement.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidOperationException("MCP resource is missing name.");
+        }
+
+        return new McpResourceDescriptor(
+            uriElement.GetString() ?? string.Empty,
+            nameElement.GetString() ?? string.Empty,
+            TryGetString(resource, "description"),
+            TryGetString(resource, "mimeType"));
+    }
+
+    private static McpReadResourceResult ParseReadResourceResult(JsonElement result)
+    {
+        if (!TryGetProperty(result, "contents", out var contentsElement) ||
+            contentsElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException("MCP resource read response is missing contents.");
+        }
+
+        var contents = new List<McpResourceContent>();
+        foreach (var content in contentsElement.EnumerateArray())
+        {
+            if (!TryGetProperty(content, "uri", out var uriElement) ||
+                uriElement.ValueKind != JsonValueKind.String)
+            {
+                throw new InvalidOperationException("MCP resource content is missing uri.");
+            }
+
+            contents.Add(new McpResourceContent(
+                uriElement.GetString() ?? string.Empty,
+                TryGetString(content, "mimeType"),
+                TryGetString(content, "text"),
+                TryGetString(content, "blob")));
+        }
+
+        return new McpReadResourceResult(contents);
+    }
+
     private static string? NormalizeId(JsonElement id) =>
         id.ValueKind switch
         {
@@ -199,6 +289,12 @@ public sealed class McpJsonRpcClient : IAsyncDisposable
             JsonValueKind.Number => id.GetRawText(),
             _ => null,
         };
+
+    private static string? TryGetString(JsonElement element, string propertyName) =>
+        TryGetProperty(element, propertyName, out var property) &&
+        property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
 
     private static McpProtocolException CreateProtocolException(
         string method,

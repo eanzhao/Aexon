@@ -18,6 +18,12 @@ public interface IMcpClientSession : IAsyncDisposable
 
     Task<IReadOnlyList<McpToolDescriptor>> ListToolsAsync(CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<McpResourceDescriptor>> ListResourcesAsync(CancellationToken cancellationToken = default);
+
+    Task<McpReadResourceResult> ReadResourceAsync(
+        string uri,
+        CancellationToken cancellationToken = default);
+
     Task<McpCallToolResult> CallToolAsync(
         string toolName,
         JsonElement arguments,
@@ -130,6 +136,14 @@ public sealed class McpClientSession : IMcpClientSession
 
         return tools;
     }
+
+    public Task<IReadOnlyList<McpResourceDescriptor>> ListResourcesAsync(CancellationToken cancellationToken = default) =>
+        _client.ListResourcesAsync(cancellationToken);
+
+    public Task<McpReadResourceResult> ReadResourceAsync(
+        string uri,
+        CancellationToken cancellationToken = default) =>
+        _client.ReadResourceAsync(uri, cancellationToken);
 
     public async Task<McpCallToolResult> CallToolAsync(
         string toolName,

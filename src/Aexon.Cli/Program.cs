@@ -241,6 +241,16 @@ internal static class Program
                 workingDirectory,
                 options.SettingsPath)
             : new McpRuntime();
+        toolRegistry.RegisterDeferred(new DeferredToolRegistration(
+            "ListMcpResources",
+            () => new ListMcpResourcesTool(mcpRuntime.ConnectionManager),
+            Aliases: ["ListMcpResourcesTool"],
+            Keywords: ["mcp", "resource", "resources", "list", "uri", "server"]));
+        toolRegistry.RegisterDeferred(new DeferredToolRegistration(
+            "ReadMcpResource",
+            () => new ReadMcpResourceTool(mcpRuntime.ConnectionManager),
+            Aliases: ["ReadMcpResourceTool"],
+            Keywords: ["mcp", "resource", "read", "uri", "server", "contents"]));
 
         await using var queryEngine = new QueryEngine(
             chatClient,
