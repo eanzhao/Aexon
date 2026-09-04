@@ -632,6 +632,10 @@ Environment:
         private readonly AgentRuntimeOptions _agentRuntimeOptions;
         private readonly string? _startupNote;
         private readonly Func<Task>? _afterInputAsync;
+        private readonly ToolProgressRenderer _toolProgressRenderer = new();
+        private readonly PermissionPrompt _permissionPrompt = new();
+        private readonly StatusBar _statusBar = new();
+        private readonly DateTimeOffset _sessionStartedAt = DateTimeOffset.UtcNow;
         private bool _exitRequested;
 
         public AexonShell(
@@ -772,14 +776,14 @@ Environment:
 
         private async Task RunQueryAsync(string input)
         {
-            var wroteAssistantText = false;
+            var wroteAssistantTextInCurrentTurn = false;
 
             await foreach (var evt in _queryEngine.SubmitMessageAsync(input))
             {
                 switch (evt)
                 {
                     case TextDeltaEvent text:
-                        wroteAssistantText = true;
+                        wroteAssistantTextInCurrentTurn = true;
                         Console.Write(text.Text);
                         break;
 
@@ -788,11 +792,19 @@ Environment:
                         break;
 
                     case ToolUseStartEvent toolUse:
-                        if (wroteAssistantText)
+                        if (wroteAssistantTextInCurrentTurn)
                             Console.WriteLine();
 
-                        Console.WriteLine(
-                            $"\n[{toolUse.ToolName}] {SummarizeToolInput(toolUse.Input)}");
+                        _toolProgressRenderer.Start(
+                            toolUse.ToolUseId,
+                            toolUse.ToolName,
+                            toolUse.Input);
+                        break;
+
+                    case ToolProgressEvent toolProgress:
+                        _toolProgressRenderer.ReportProgress(
+                            toolProgress.ToolUseId,
+                            toolProgress.Message);
                         break;
 
                     case PermissionRequestEvent permissionRequest:
@@ -800,8 +812,10 @@ Environment:
                         break;
 
                     case ToolResultEvent toolResult:
-                        var status = toolResult.IsError ? "failed" : "done";
-                        Console.WriteLine($"[{toolResult.ToolName}] {status}");
+                        _toolProgressRenderer.Complete(
+                            toolResult.ToolUseId,
+                            toolResult.ToolName,
+                            toolResult.IsError);
                         if (toolResult.IsError)
                             Console.WriteLine(toolResult.Result);
                         break;
@@ -834,8 +848,13 @@ Environment:
                         break;
 
                     case MessageEndEvent:
-                        if (wroteAssistantText)
+                        if (wroteAssistantTextInCurrentTurn)
                             Console.WriteLine();
+                        _statusBar.Refresh(new StatusBarSnapshot(
+                            _queryEngine.CurrentModel,
+                            _queryEngine.TotalUsage,
+                            DateTimeOffset.UtcNow - _sessionStartedAt));
+                        wroteAssistantTextInCurrentTurn = false;
                         break;
 
                     case PromptCacheStatusEvent cacheStatus when cacheStatus.BreakDetected:
@@ -925,15 +944,38 @@ Environment:
             if (Console.IsInputRedirected)
                 return false;
 
-            Console.Write($"{request.Description}，是否允许？ [y/N] ");
-            var answer = Console.ReadLine()?.Trim();
-            return answer is "y" or "Y" or "yes" or "YES";
+            var decision = _permissionPrompt.Prompt(
+                request.ToolName,
+                request.Description,
+                request.Input);
+
+            if (decision == PermissionPromptDecision.AlwaysAllow)
+            {
+                AddAlwaysAllowRule(request);
+                return true;
+            }
+
+            return decision == PermissionPromptDecision.Yes;
         }
 
-        private static string SummarizeToolInput(JsonElement input)
+        private void AddAlwaysAllowRule(PermissionRequestEvent request)
         {
-            var raw = input.GetRawText();
-            return raw.Length <= 120 ? raw : $"{raw[..117]}...";
+            var toolName = request.ToolName.Trim();
+            var ruleContent = PermissionPrompt.ExtractRuleTarget(request.Input);
+            var rule = PermissionRule.Create(
+                PermissionBehavior.Allow,
+                toolName,
+                ruleContent);
+
+            if (!_permissionContext.Rules.Any(existing =>
+                    existing.Behavior == PermissionBehavior.Allow &&
+                    string.Equals(existing.ToolName, rule.ToolName, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(existing.RuleContent, rule.RuleContent, StringComparison.OrdinalIgnoreCase)))
+            {
+                _permissionContext.Rules.Add(rule);
+            }
+
+            Console.WriteLine($"已加入本次会话的允许规则: {rule.ToExpression()}");
         }
 
         private static bool LooksLikePermissionError(string result) =>
