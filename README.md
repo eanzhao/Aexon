@@ -157,6 +157,24 @@ aexon --provider ollama --model qwen3:4b "summarize this repo"
 aexon --continue
 ```
 
+## Using NyxID
+
+NyxID can broker downstream LLM credentials and proxy Anthropic/OpenAI traffic for Aexon. Before using `--nyxid`, add the downstream service in NyxID first:
+
+```bash
+nyxid service add llm-anthropic
+nyxid service add llm-openai
+```
+
+Then sign in from Aexon and route requests through the NyxID proxy:
+
+```bash
+aexon /login
+aexon --provider anthropic --nyxid "explain this repo"
+```
+
+Set `NYXID_BASE_URL` if you need to target a NyxID instance other than the default hosted endpoint `https://nyx-api.chrono-ai.fun`.
+
 ## Hooks And MCP Settings
 
 Unless `--settings` is provided, Aexon merges matching `settings.json` files from these locations:

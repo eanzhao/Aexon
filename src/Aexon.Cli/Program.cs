@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Aexon.Commands;
 using Aexon.Core.Agents;
+using Aexon.Core.Auth;
 using Aexon.Core.AppState;
 using Aexon.Core.Channels;
 using Aexon.Core.Commands;
@@ -61,6 +62,10 @@ internal static class Program
         var transcriptStore = new JsonlTranscriptStore();
         var resumeLoader = new SessionResumeLoader(transcriptStore, new ConversationRecovery());
         var restorePipeline = new SessionRestorePipeline();
+        var nyxIdCredentialStore = new NyxIdCredentialStore();
+        var nyxIdSettings = NyxIdCliSettingsLoader.Load(nyxIdCredentialStore);
+        var nyxIdAuthService = new NyxIdAuthService(credentialStore: nyxIdCredentialStore);
+        var nyxIdTokenProvider = new NyxIdTokenProvider(nyxIdCredentialStore, nyxIdAuthService);
 
         ProcessedResume? resumed = null;
         if (options.ContinueLatest || !string.IsNullOrWhiteSpace(options.ResumeTarget))
@@ -120,6 +125,12 @@ internal static class Program
             resumed?.Model);
         var aiProvider = sessionTarget.Provider;
         var model = sessionTarget.Model;
+        if (options.UseNyxId && aiProvider == AiProvider.Ollama)
+        {
+            Console.Error.WriteLine("--nyxid 只支持 anthropic 和 openai provider。");
+            return 1;
+        }
+
         var config = new QueryEngineConfig
         {
             Provider = aiProvider,
@@ -141,11 +152,18 @@ internal static class Program
             rawAnthropicSettings,
             providerRouter.Resolve(model));
         var anthropicSettings = managedPolicy.AnthropicSettings;
+        var nyxIdRouting = options.UseNyxId
+            ? new NyxIdRoutingContext(
+                nyxIdSettings.ActiveBaseUrl,
+                nyxIdTokenProvider,
+                nyxIdSettings.HasStoredCredentials)
+            : null;
         using var chatClientRuntime = ChatClientRuntime.Create(
             aiProvider,
             model,
             config,
-            anthropicSettings);
+            anthropicSettings,
+            nyxIdRouting);
         var chatClient = chatClientRuntime.ChatClient;
         var agentSettings = AgentSettingsLoader.Load(
             workingDirectory,
@@ -234,7 +252,10 @@ internal static class Program
             messageActivationRuntime,
             agentRuntimeOptions,
             agentSettings.Settings.BackgroundRunConcurrency);
-        var commandRegistry = BuildCommandRegistry();
+        var commandRegistry = BuildCommandRegistry(
+            nyxIdAuthService,
+            nyxIdCredentialStore,
+            nyxIdSettings.ActiveBaseUrl);
         await using var mcpRuntime = managedPolicy.AllowExternalMcpServers
             ? await McpRuntime.CreateAsync(
                 toolRegistry,
@@ -558,7 +579,10 @@ internal static class Program
         }
     }
 
-    private static CommandRegistry BuildCommandRegistry()
+    private static CommandRegistry BuildCommandRegistry(
+        NyxIdAuthService nyxIdAuthService,
+        NyxIdCredentialStore nyxIdCredentialStore,
+        string nyxIdBaseUrl)
     {
         var registry = new CommandRegistry();
         registry.Register(new HelpCommand());
@@ -569,6 +593,8 @@ internal static class Program
         registry.Register(new ExitCommand());
         registry.Register(new FastCommand());
         registry.Register(new AgentsCommand());
+        registry.Register(new LoginCommand(nyxIdAuthService, nyxIdCredentialStore, nyxIdBaseUrl));
+        registry.Register(new LogoutCommand(nyxIdAuthService, nyxIdCredentialStore));
         registry.Register(new MailboxCommand());
         registry.Register(new ModelCommand());
         registry.Register(new MicrocompactCommand());
@@ -588,13 +614,14 @@ internal static class Program
     {
         Console.WriteLine("""
 Usage:
-  aexon [--cwd <path>] [--model <model>] [--provider <name>] [--resume <session>] [--continue] [--fork-session] [--settings <path>] [prompt]
+  aexon [--cwd <path>] [--model <model>] [--provider <name>] [--nyxid] [--resume <session>] [--continue] [--fork-session] [--settings <path>] [prompt]
   aexon --print [-p] [--output-format <text|markdown|json>] [--approval-mode <allow|deny>] [--max-turns <n>] [prompt]
 
 Options:
   --cwd <path>       Working directory for this session
   --model <model>    Main model or alias (sonnet / opus / haiku / gpt-4o / o3 / ...)
   --provider <name>  AI provider: anthropic (default), openai, or ollama
+  --nyxid            Route Anthropic/OpenAI requests through the NyxID proxy
   --resume <id>      Resume a specific session by id, directory, manifest, or transcript path
   --continue         Resume the most recently updated session
   --fork-session     Fork the resumed transcript into a brand new session
@@ -610,6 +637,7 @@ Environment:
   ANTHROPIC_API_KEY  API key for Anthropic Claude models
   OPENAI_API_KEY     API key for OpenAI models
   OPENAI_BASE_URL    Custom base URL for OpenAI-compatible endpoints
+  NYXID_BASE_URL     NyxID base URL for /login defaults and --nyxid routing
   OLLAMA_HOST        Base URL for the Ollama server (default: http://127.0.0.1:11434)
   OLLAMA_BASE_URL    Alias for OLLAMA_HOST
   AEXON_CHAT_LOGGING Enable MEAI pipeline logging on the console (1/true)

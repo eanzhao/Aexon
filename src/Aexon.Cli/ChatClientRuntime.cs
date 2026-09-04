@@ -32,9 +32,10 @@ internal sealed class ChatClientRuntime : IDisposable
         AiProvider provider,
         string model,
         QueryEngineConfig config,
-        AnthropicClientSettings anthropicSettings)
+        AnthropicClientSettings anthropicSettings,
+        NyxIdRoutingContext? nyxIdRouting = null)
     {
-        var bootstrap = ChatClientFactory.Create(provider, model, anthropicSettings);
+        var bootstrap = ChatClientFactory.Create(provider, model, anthropicSettings, nyxIdRouting);
         var pipelineSettings = ChatClientPipelineSettingsLoader.Load();
 
         var services = new ServiceCollection();

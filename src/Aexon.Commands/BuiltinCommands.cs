@@ -1,4 +1,5 @@
 using Aexon.Core.Agents;
+using Aexon.Core.Auth;
 using Aexon.Core.Commands;
 using Aexon.Core.Compaction;
 using Aexon.Core.Permissions;
@@ -114,6 +115,78 @@ public class ExitCommand : ICommand
     {
         context.RequestExit?.Invoke();
         return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Represents NyxID login command.
+/// </summary>
+public sealed class LoginCommand(
+    NyxIdAuthService authService,
+    NyxIdCredentialStore credentialStore,
+    string defaultBaseUrl) : ICommand
+{
+    public string Name => "login";
+    public string Description => "Sign in with NyxID";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        var requestedBaseUrl = string.IsNullOrWhiteSpace(args)
+            ? credentialStore.Load()?.BaseUrl ?? defaultBaseUrl
+            : args.Trim();
+
+        try
+        {
+            var credentials = await authService.LoginAsync(requestedBaseUrl, context.CancellationToken);
+            credentialStore.Save(credentials);
+
+            if (NyxIdJwtPayloadReader.TryGetStringClaim(credentials.IdToken, "email", out var email))
+            {
+                context.WriteLine($"  Signed in to NyxID as {email}.");
+            }
+            else
+            {
+                context.WriteLine($"  Signed in to NyxID at {credentials.BaseUrl}.");
+            }
+        }
+        catch (Exception ex)
+        {
+            context.WriteLine($"  NyxID login failed: {ex.Message}");
+        }
+    }
+}
+
+/// <summary>
+/// Represents NyxID logout command.
+/// </summary>
+public sealed class LogoutCommand(
+    NyxIdAuthService authService,
+    NyxIdCredentialStore credentialStore) : ICommand
+{
+    public string Name => "logout";
+    public string Description => "Sign out from NyxID";
+
+    public async Task ExecuteAsync(string args, CommandContext context)
+    {
+        var credentials = credentialStore.Load();
+        if (credentials == null)
+        {
+            context.WriteLine("  No NyxID login is currently stored.");
+            return;
+        }
+
+        try
+        {
+            await authService.LogoutAsync(
+                credentials.BaseUrl,
+                credentials.RefreshToken ?? string.Empty,
+                context.CancellationToken);
+            context.WriteLine("  Signed out from NyxID.");
+        }
+        catch (Exception ex)
+        {
+            context.WriteLine($"  NyxID logout failed: {ex.Message}");
+        }
     }
 }
 

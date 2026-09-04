@@ -1,4 +1,6 @@
 using System.ClientModel;
+using System.ClientModel.Primitives;
+using Aexon.Core.Auth;
 using Aexon.Core.Configuration;
 using Aexon.Core.Query;
 using Anthropic;
@@ -18,13 +20,18 @@ internal static class ChatClientFactory
     public static ChatClientBootstrap Create(
         AiProvider provider,
         string model,
-        AnthropicClientSettings anthropicSettings)
+        AnthropicClientSettings anthropicSettings,
+        NyxIdRoutingContext? nyxIdRouting = null)
     {
         return provider switch
         {
-            AiProvider.OpenAI => CreateOpenAI(model),
+            AiProvider.OpenAI => nyxIdRouting != null
+                ? CreateOpenAIWithNyxId(model, nyxIdRouting)
+                : CreateOpenAI(model),
             AiProvider.Ollama => CreateOllama(model),
-            _ => CreateAnthropic(model, anthropicSettings),
+            _ => nyxIdRouting != null
+                ? CreateAnthropicWithNyxId(model, nyxIdRouting)
+                : CreateAnthropic(model, anthropicSettings),
         };
     }
 
@@ -66,6 +73,31 @@ internal static class ChatClientFactory
             settings.StartupSummary);
     }
 
+    private static ChatClientBootstrap CreateOpenAIWithNyxId(
+        string model,
+        NyxIdRoutingContext routing)
+    {
+        var proxyBaseUrl = NyxIdProxyEndpoints.Resolve(routing.BaseUrl, AiProvider.OpenAI);
+        var httpClient = new HttpClient(
+            new NyxIdProxyAuthenticationHandler(routing.TokenProvider)
+            {
+                InnerHandler = new HttpClientHandler(),
+            },
+            disposeHandler: true);
+        var client = new OpenAIClient(
+            new ApiKeyCredential("nyxid-proxy"),
+            new OpenAIClientOptions
+            {
+                Endpoint = proxyBaseUrl,
+                Transport = new HttpClientPipelineTransport(httpClient),
+            });
+
+        return new ChatClientBootstrap(
+            new OwnedChatClient(client.GetChatClient(model).AsIChatClient(), httpClient),
+            routing.HasStoredCredentials,
+            BuildNyxIdStartupSummary("OpenAI", proxyBaseUrl, routing.HasStoredCredentials));
+    }
+
     private static ChatClientBootstrap CreateOllama(string model)
     {
         var settings = OllamaClientSettingsLoader.Load();
@@ -75,6 +107,37 @@ internal static class ChatClientFactory
             (IChatClient)client,
             true,
             settings.StartupSummary);
+    }
+
+    private static ChatClientBootstrap CreateAnthropicWithNyxId(
+        string model,
+        NyxIdRoutingContext routing)
+    {
+        var responseObserver = new ApiResponseObserver();
+        var proxyBaseUrl = NyxIdProxyEndpoints.Resolve(routing.BaseUrl, AiProvider.Anthropic);
+        var client = new AnthropicClient
+        {
+            ApiKey = "nyxid-proxy",
+            BaseUrl = proxyBaseUrl.ToString().TrimEnd('/'),
+            HttpClient = responseObserver.CreateHttpClient(
+                new NyxIdProxyAuthenticationHandler(routing.TokenProvider)
+                {
+                    InnerHandler = new HttpClientHandler(),
+                }),
+            MaxRetries = 0,
+        };
+
+        var chatClient = new OwnedChatClient(
+            new AnthropicRetryMiddleware(
+                new AnthropicThinkingMiddleware(
+                    client.AsIChatClient(model, defaultMaxOutputTokens: 16384)),
+                responseObserver),
+            client);
+
+        return new ChatClientBootstrap(
+            chatClient,
+            routing.HasStoredCredentials,
+            BuildNyxIdStartupSummary("Anthropic", proxyBaseUrl, routing.HasStoredCredentials));
     }
 
     private static AnthropicClient CreateAnthropicClient(
@@ -162,4 +225,21 @@ internal static class ChatClientFactory
             }
         }
     }
+
+    private static string BuildNyxIdStartupSummary(
+        string providerName,
+        Uri proxyBaseUrl,
+        bool hasStoredCredentials)
+    {
+        var summary = $"NyxID routing: proxying {providerName} via {proxyBaseUrl}.";
+        if (hasStoredCredentials)
+            return summary;
+
+        return $"{summary}{Environment.NewLine}NyxID routing is enabled, but no NyxID credentials are stored yet. Run aexon /login first.";
+    }
 }
+
+internal sealed record NyxIdRoutingContext(
+    string BaseUrl,
+    NyxIdTokenProvider TokenProvider,
+    bool HasStoredCredentials);

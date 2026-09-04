@@ -7,6 +7,7 @@ internal sealed record CliOptions(
     bool ContinueLatest,
     bool ForkSession,
     bool PrintMode,
+    bool UseNyxId,
     string? WorkingDirectory,
     string? Model,
     string? Provider,
@@ -24,6 +25,7 @@ internal sealed record CliOptions(
         var continueLatest = false;
         var forkSession = false;
         var printMode = false;
+        var useNyxId = false;
         string? workingDirectory = null;
         string? model = null;
         string? provider = null;
@@ -47,6 +49,10 @@ internal sealed record CliOptions(
                 case "--print":
                 case "-p":
                     printMode = true;
+                    break;
+
+                case "--nyxid":
+                    useNyxId = true;
                     break;
 
                 case "--cwd":
@@ -134,6 +140,7 @@ internal sealed record CliOptions(
             continueLatest,
             forkSession,
             printMode,
+            useNyxId,
             workingDirectory,
             model,
             provider,

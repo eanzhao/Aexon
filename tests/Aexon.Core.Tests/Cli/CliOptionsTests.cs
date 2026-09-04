@@ -24,9 +24,20 @@ public sealed class CliOptionsTests
         Assert.Equal(NonInteractiveOutputFormat.Json, options.OutputFormat);
         Assert.Equal(NonInteractiveApprovalMode.Allow, options.ApprovalMode);
         Assert.Equal(7, options.MaxTurns);
+        Assert.False(options.UseNyxId);
         Assert.Equal("openai", options.Provider);
         Assert.Equal("review this repo", options.InitialPrompt);
         Assert.Null(options.ParseError);
+    }
+
+    [Fact]
+    public void Parse_RecognizesNyxIdFlag()
+    {
+        var options = CliOptions.Parse(["--provider", "anthropic", "--nyxid", "explain", "this", "repo"]);
+
+        Assert.True(options.UseNyxId);
+        Assert.Equal("anthropic", options.Provider);
+        Assert.Equal("explain this repo", options.InitialPrompt);
     }
 
     [Fact]
