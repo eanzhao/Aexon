@@ -185,6 +185,11 @@ public record SystemScheduledTaskFireMessage : SystemMessage
     public DateTimeOffset? ScheduledAt { get; init; }
     public DateTimeOffset? FiredAt { get; init; }
     public string? Result { get; init; }
+    public string? SessionId { get; init; }
+    public string? Prompt { get; init; }
+    public string? Reason { get; init; }
+    [JsonIgnore]
+    public bool HasWakeupPrompt => !string.IsNullOrWhiteSpace(Prompt);
 }
 
 /// <summary>

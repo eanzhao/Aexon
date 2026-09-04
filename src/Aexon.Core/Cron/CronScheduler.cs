@@ -77,12 +77,23 @@ public sealed class CronScheduler : IAsyncDisposable
 
         try
         {
-            var (exitCode, text) = await RunCommandAsync(
-                job.Command,
-                _workingDirectory,
-                cancellationToken);
-            success = exitCode == 0;
-            output = text.Length > 4096 ? text[..4096] : text;
+            if (job.Kind == CronJobKind.Wakeup)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                success = true;
+                output = string.IsNullOrWhiteSpace(job.Prompt)
+                    ? "Wakeup fired."
+                    : job.Prompt;
+            }
+            else
+            {
+                var (exitCode, text) = await RunCommandAsync(
+                    job.Command,
+                    _workingDirectory,
+                    cancellationToken);
+                success = exitCode == 0;
+                output = text.Length > 4096 ? text[..4096] : text;
+            }
         }
         catch (Exception ex)
         {

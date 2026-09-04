@@ -443,6 +443,7 @@ public class QueryEngine : IAsyncDisposable, IPlanModeController, IAwayModeContr
         AskUserQuestionAsync = _askUserQuestion,
         MainLoopModel = _config.Model,
         MainLoopProvider = _config.Provider,
+        LoopSessionId = SessionId,
     };
 
     private async Task<string> BuildSystemPromptAsync()

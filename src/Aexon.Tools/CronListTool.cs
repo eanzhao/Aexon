@@ -119,7 +119,17 @@ public sealed class CronListTool : ITool
                 .Append(job.Enabled ? "enabled" : "disabled")
                 .Append("] ")
                 .AppendLine(job.Schedule);
-            sb.Append("  command: ").AppendLine(job.Command);
+            if (job.Kind == CronJobKind.Wakeup)
+            {
+                sb.Append("  prompt: ").AppendLine(job.Prompt ?? string.Empty);
+                if (!string.IsNullOrWhiteSpace(job.SessionId))
+                    sb.Append("  session_id: ").AppendLine(job.SessionId);
+            }
+            else
+            {
+                sb.Append("  command: ").AppendLine(job.Command);
+            }
+
             if (!string.IsNullOrWhiteSpace(job.Description))
                 sb.Append("  description: ").AppendLine(job.Description);
             if (job.LastRunAt != null)

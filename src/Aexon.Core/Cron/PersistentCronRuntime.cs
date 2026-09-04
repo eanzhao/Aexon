@@ -45,6 +45,17 @@ public sealed class PersistentCronRuntime : ICronRuntime
         return job;
     }
 
+    public CronJob CreateWakeupJob(
+        string sessionId,
+        TimeSpan delay,
+        string prompt,
+        string reason)
+    {
+        var job = _inner.CreateWakeupJob(sessionId, delay, prompt, reason);
+        Persist(CronPersistence.CreateJobEntry(job));
+        return job;
+    }
+
     public CronJob? GetJob(string id) => _inner.GetJob(id);
 
     public IReadOnlyList<CronJob> ListJobs() => _inner.ListJobs();
@@ -96,11 +107,14 @@ public sealed class PersistentCronRuntime : ICronRuntime
 
         var message = new SystemScheduledTaskFireMessage
         {
-            Content = $"Scheduled task '{job.Id}' fired.",
+            Content = BuildScheduledTaskContent(job),
             TaskName = job.Id,
             ScheduledAt = record.StartedAt,
             FiredAt = record.StartedAt,
             Result = record.Success ? "completed" : "failed",
+            SessionId = job.SessionId,
+            Prompt = job.Prompt,
+            Reason = job.Description,
         };
 
         try
@@ -111,5 +125,16 @@ public sealed class PersistentCronRuntime : ICronRuntime
         {
             // Runtime messages are best-effort; cron execution should still succeed.
         }
+    }
+
+    private static string BuildScheduledTaskContent(CronJob job)
+    {
+        if (job.Kind != CronJobKind.Wakeup || string.IsNullOrWhiteSpace(job.Prompt))
+            return $"Scheduled task '{job.Id}' fired.";
+
+        if (string.IsNullOrWhiteSpace(job.Description))
+            return $"Scheduled wakeup '{job.Id}' fired. Prompt: {job.Prompt}";
+
+        return $"Scheduled wakeup '{job.Id}' fired. Reason: {job.Description}. Prompt: {job.Prompt}";
     }
 }

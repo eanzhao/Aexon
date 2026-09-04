@@ -428,6 +428,16 @@ internal static class Program
             Aliases: ["CronListTool"],
             Keywords: ["cron", "schedule", "scheduled", "job", "list"]));
         registry.RegisterDeferred(new DeferredToolRegistration(
+            "Sleep",
+            () => new SleepTool(),
+            Aliases: ["SleepTool"],
+            Keywords: ["sleep", "wait", "delay", "pause", "timer"]));
+        registry.RegisterDeferred(new DeferredToolRegistration(
+            "ScheduleWakeup",
+            () => new ScheduleWakeupTool(cronRuntime),
+            Aliases: ["ScheduleWakeupTool"],
+            Keywords: ["sleep", "wait", "wakeup", "wake", "schedule", "timer"]));
+        registry.RegisterDeferred(new DeferredToolRegistration(
             "TeamCreate",
             () => new TeamCreateTool(agentTeamRuntime),
             Keywords: ["team", "teammate", "squad", "group", "parallel"]));

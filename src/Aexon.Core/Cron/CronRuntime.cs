@@ -1,15 +1,28 @@
 namespace Aexon.Core.Cron;
 
 /// <summary>
+/// Identifies the execution mode for a scheduled job.
+/// </summary>
+public enum CronJobKind
+{
+    Command,
+    Wakeup,
+}
+
+/// <summary>
 /// Represents a scheduled cron job.
 /// </summary>
 public sealed class CronJob
 {
+    public CronJobKind Kind { get; init; } = CronJobKind.Command;
     public required string Id { get; init; }
     public required string Schedule { get; init; }
     public required string Command { get; set; }
     public string? Description { get; set; }
     public bool Enabled { get; set; } = true;
+    public bool RunOnce { get; init; }
+    public string? SessionId { get; init; }
+    public string? Prompt { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? LastRunAt { get; set; }
@@ -18,11 +31,15 @@ public sealed class CronJob
     public CronJob Clone() =>
         new()
         {
+            Kind = Kind,
             Id = Id,
             Schedule = Schedule,
             Command = Command,
             Description = Description,
             Enabled = Enabled,
+            RunOnce = RunOnce,
+            SessionId = SessionId,
+            Prompt = Prompt,
             CreatedAt = CreatedAt,
             UpdatedAt = UpdatedAt,
             LastRunAt = LastRunAt,
@@ -49,6 +66,7 @@ public sealed class CronExecutionRecord
 public interface ICronRuntime
 {
     CronJob CreateJob(string id, string schedule, string command, string? description = null);
+    CronJob CreateWakeupJob(string sessionId, TimeSpan delay, string prompt, string reason);
     CronJob? GetJob(string id);
     IReadOnlyList<CronJob> ListJobs();
     bool DeleteJob(string id);
@@ -95,6 +113,7 @@ public sealed class InMemoryCronRuntime : ICronRuntime
         var now = DateTimeOffset.UtcNow;
         var job = new CronJob
         {
+            Kind = CronJobKind.Command,
             Id = id.Trim(),
             Schedule = schedule.Trim(),
             Command = command.Trim(),
@@ -102,6 +121,45 @@ public sealed class InMemoryCronRuntime : ICronRuntime
             CreatedAt = now,
             UpdatedAt = now,
             NextRunAt = expression.NextOccurrence(now),
+        };
+
+        lock (_gate)
+        {
+            if (_jobs.ContainsKey(job.Id))
+                throw new InvalidOperationException($"Cron job '{job.Id}' already exists.");
+
+            _jobs[job.Id] = job;
+            return job.Clone();
+        }
+    }
+
+    public CronJob CreateWakeupJob(
+        string sessionId,
+        TimeSpan delay,
+        string prompt,
+        string reason)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        if (delay <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(delay), "Wakeup delay must be greater than zero.");
+
+        var now = DateTimeOffset.UtcNow;
+        var job = new CronJob
+        {
+            Kind = CronJobKind.Wakeup,
+            Id = CreateWakeupJobId(),
+            Schedule = $"@after {(int)Math.Ceiling(delay.TotalSeconds)}s",
+            Command = string.Empty,
+            Description = NormalizeDescription(reason),
+            Enabled = true,
+            RunOnce = true,
+            SessionId = sessionId.Trim(),
+            Prompt = prompt.Trim(),
+            CreatedAt = now,
+            UpdatedAt = now,
+            NextRunAt = now.Add(delay),
         };
 
         lock (_gate)
@@ -157,9 +215,17 @@ public sealed class InMemoryCronRuntime : ICronRuntime
             if (_jobs.TryGetValue(record.JobId, out var job))
             {
                 job.LastRunAt = record.StartedAt;
-                var expression = CronExpression.TryParse(job.Schedule);
-                job.NextRunAt = expression?.NextOccurrence(record.StartedAt);
                 job.UpdatedAt = DateTimeOffset.UtcNow;
+                if (job.RunOnce)
+                {
+                    job.Enabled = false;
+                    job.NextRunAt = null;
+                }
+                else
+                {
+                    var expression = CronExpression.TryParse(job.Schedule);
+                    job.NextRunAt = expression?.NextOccurrence(record.StartedAt);
+                }
             }
         }
     }
@@ -182,4 +248,6 @@ public sealed class InMemoryCronRuntime : ICronRuntime
 
     private static string? NormalizeDescription(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string CreateWakeupJobId() => $"wakeup-{Guid.NewGuid():N}";
 }

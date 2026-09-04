@@ -161,6 +161,11 @@ public class ToolExecutionContext
     /// Gets the provider used by the main loop.
     /// </summary>
     public Query.AiProvider MainLoopProvider { get; init; } = Query.AiProvider.Anthropic;
+
+    /// <summary>
+    /// Gets the active loop-backed session id, when available.
+    /// </summary>
+    public string? LoopSessionId { get; init; }
 }
 
 /// <summary>

@@ -28,11 +28,15 @@ public static class CronPersistence
             JobEventType,
             JsonSerializer.SerializeToElement(new CronJobPayload
             {
+                Kind = job.Kind,
                 Id = job.Id,
                 Schedule = job.Schedule,
                 Command = job.Command,
                 Description = job.Description,
                 Enabled = job.Enabled,
+                RunOnce = job.RunOnce,
+                SessionId = job.SessionId,
+                Prompt = job.Prompt,
                 CreatedAt = job.CreatedAt,
                 UpdatedAt = job.UpdatedAt,
                 LastRunAt = job.LastRunAt,
@@ -84,11 +88,15 @@ public static class CronPersistence
                     {
                         jobs[jobPayload.Id] = new CronJob
                         {
+                            Kind = jobPayload.Kind,
                             Id = jobPayload.Id,
                             Schedule = jobPayload.Schedule,
                             Command = jobPayload.Command,
                             Description = jobPayload.Description,
                             Enabled = jobPayload.Enabled,
+                            RunOnce = jobPayload.RunOnce,
+                            SessionId = jobPayload.SessionId,
+                            Prompt = jobPayload.Prompt,
                             CreatedAt = jobPayload.CreatedAt,
                             UpdatedAt = jobPayload.UpdatedAt,
                             LastRunAt = jobPayload.LastRunAt,
@@ -164,11 +172,15 @@ public static class CronPersistence
 
     private sealed class CronJobPayload
     {
+        public CronJobKind Kind { get; init; } = CronJobKind.Command;
         public required string Id { get; init; }
         public required string Schedule { get; init; }
         public required string Command { get; init; }
         public string? Description { get; init; }
         public bool Enabled { get; init; } = true;
+        public bool RunOnce { get; init; }
+        public string? SessionId { get; init; }
+        public string? Prompt { get; init; }
         public required DateTimeOffset CreatedAt { get; init; }
         public required DateTimeOffset UpdatedAt { get; init; }
         public DateTimeOffset? LastRunAt { get; init; }
